@@ -1,0 +1,68 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# ========================
+# 1. GENEL SİSTEM & IDE
+# ========================
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*.log
+
+# ========================
+# 2. GÜVENLİK (Şifreler)
+# ========================
+# Bu dosyalar ASLA GitHub'a gitmemeli
+.env
+env/
+*.env
+local.properties
+secrets.properties
+application-secrets.properties
+*.jks
+*.keystore
+
+# ========================
+# 3. ANDROID (Frontend)
+# ========================
+.gradle/
+build/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+
+# ========================
+# 4. BACKEND (Spring/Java)
+# ========================
+target/
+**/target/
+*.class
+bin/
+.classpath
+.project
+.settings/
+help.md
+
+# ========================
+# 5. TEST & GEÇİCİ DOSYALAR
+# ========================
+test-output/
+tmp/
