@@ -39,6 +39,9 @@ interface PetitionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertReadyTemplates(templates: List<ReadyTemplateEntity>)
 
+    @Query("DELETE FROM ready_templates")
+    suspend fun deleteAllReadyTemplates()
+
     @Query("SELECT * FROM ready_templates")
     suspend fun getReadyTemplates(): List<ReadyTemplateEntity>
 }
