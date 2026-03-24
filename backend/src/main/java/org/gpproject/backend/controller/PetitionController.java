@@ -1,10 +1,10 @@
 package org.gpproject.backend.controller;
 
 import lombok.RequiredArgsConstructor;
-import org.batuhanozdemir.smartpetitiongeneratorbackenddemo.model.AiResponse;
-import org.batuhanozdemir.smartpetitiongeneratorbackenddemo.model.UserPrompt;
-import org.batuhanozdemir.smartpetitiongeneratorbackenddemo.service.QueueService;
-import org.batuhanozdemir.smartpetitiongeneratorbackenddemo.service.TicketState;
+import org.gpproject.backend.model.AiResponse;
+import org.gpproject.backend.model.UserPrompt;
+import org.gpproject.backend.service.QueueService;
+import org.gpproject.backend.service.TicketState;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
