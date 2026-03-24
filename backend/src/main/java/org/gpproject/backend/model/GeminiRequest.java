@@ -11,9 +11,9 @@ import lombok.NoArgsConstructor;
 public class GeminiRequest {
 
     @SerializedName("system_instruction")
-    private Content systemInstruction;  // ← Ayrı alan
+    private Content systemInstruction;  // Ayrı alan
 
-    private Content[] contents;         // ← Sadece kullanıcı mesajı
+    private Content[] contents;         // Sadece kullanıcı mesajı
 
     @SerializedName("generationConfig")
     private GenerationConfig generationConfig;
