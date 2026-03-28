@@ -35,22 +35,31 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.gpproject.smartpetitiongenerator.data.local.UserProfile
 import com.gpproject.smartpetitiongenerator.ui.theme.ThemeMode
+import com.gpproject.smartpetitiongenerator.ui.viewmodel.PetitionViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(
     navController: NavController,
+    viewModel: PetitionViewModel,
     selectedThemeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit
 ) {
-
+    val currentProfile by viewModel.userProfile
 
     var fullName by remember { mutableStateOf("") }
     var identityNumber by remember { mutableStateOf("") }
     var phoneNumber by remember { mutableStateOf("") }
     var address by remember { mutableStateOf("") }
 
-
+    LaunchedEffect(currentProfile) {
+        currentProfile?.let {
+            fullName = it.fullName
+            identityNumber = it.identityNumber
+            phoneNumber = it.phoneNumber
+            address = it.address
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -162,7 +171,7 @@ fun ProfileScreen(
                         phoneNumber = phoneNumber,
                         address = address
                     )
-
+                    viewModel.saveProfile(newProfile)
                     navController.popBackStack()
                 },
                 modifier = Modifier
