@@ -19,4 +19,9 @@ interface AiApiService {
         @Header("X-Client-Id") clientId: String,
         @Path("ticketId") ticketId: String
     ): AiResponse
+
+    @POST("/api/v1/petition/ocr-layout")
+    suspend fun analyzeOcrLayout(
+        @Body request: OcrLayoutRequest
+    ): OcrLayoutResponse
 }
