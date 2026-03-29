@@ -5,11 +5,11 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import com.gpproject.smartpetitiongenerator.data.local.*
 
-// Rapor Referansı: Figure 3.1 - AppDatabase [cite: 245]
 @Database(
-    entities = [UserProfile::class, PetitionEntity::class, TemplateEntity::class],
-    version = 2,
+    entities = [UserProfile::class, PetitionEntity::class, TemplateEntity::class, ReadyTemplateEntity::class],
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -27,7 +27,9 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "smart_petition_db"
-                ).build()
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
                 INSTANCE = instance
                 instance
             }

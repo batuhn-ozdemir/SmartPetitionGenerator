@@ -44,4 +44,10 @@ interface PetitionDao {
 
     @Query("SELECT * FROM ready_templates")
     suspend fun getReadyTemplates(): List<ReadyTemplateEntity>
+
+    @Query("DELETE FROM ready_templates WHERE id = :templateId")
+    suspend fun deleteReadyTemplateById(templateId: String)
+
+    @Query("DELETE FROM ready_templates WHERE id LIKE :prefixPattern")
+    suspend fun deleteReadyTemplatesByIdPattern(prefixPattern: String)
 }
