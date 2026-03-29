@@ -2,6 +2,7 @@ package com.gpproject.smartpetitiongenerator.ui.screens
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -62,6 +63,7 @@ fun ProfileScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0.dp, 0.dp, 0.dp, 0.dp),
         topBar = {
             TopAppBar(
                 title = { Text("Profil Bilgileri") },
@@ -78,19 +80,12 @@ fun ProfileScreen(
                 .padding(padding)
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState())
-                .fillMaxSize()
+                .fillMaxWidth()
         ) {
             Text(
                 text = "Dilekçelerinizde otomatik kullanılacak varsayılan bilgilerinizi buradan düzenleyebilirsiniz.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Text(
-                text = "Tema",
-                style = MaterialTheme.typography.titleMedium
             )
 
             Spacer(modifier = Modifier.height(20.dp))
