@@ -16,17 +16,17 @@ public class QueueService {
 
     private final GeminiService geminiService;
 
-    //  Ticket store (owner + status + payload)
+    // ✅ Ticket store (owner + status + payload)
     private final ConcurrentHashMap<String, TicketState> tickets = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> ticketPrompts = new ConcurrentHashMap<>();
 
-    //  Per-user queues (fairness)
+    // ✅ Per-user queues (fairness)
     private final ConcurrentHashMap<String, ConcurrentLinkedQueue<String>> userQueues = new ConcurrentHashMap<>();
     private final ConcurrentLinkedQueue<String> roundRobinUsers = new ConcurrentLinkedQueue<>();
     private final Set<String> usersInRoundRobin = ConcurrentHashMap.newKeySet();
 
-    //  Worker pool (aynı anda kaç Gemini çağrısı)
-    private static final int MAX_CONCURRENT_WORKERS = 2; // ihtiyaca göre 1-4
+    // ✅ Worker pool (aynı anda kaç Gemini çağrısı)
+    private static final int MAX_CONCURRENT_WORKERS = 4; // ihtiyaca göre 1-4
     private final Semaphore workerPermits = new Semaphore(MAX_CONCURRENT_WORKERS);
 
     private final ExecutorService executor = Executors.newFixedThreadPool(
@@ -41,16 +41,14 @@ public class QueueService {
             }
     );
 
-    //  Rate limit (global). Gemini kota/rate için.
+    // ✅ Rate limit (global). Gemini kota/rate için.
     // Örn: 1200ms => ~0.8 req/s. (Senin eski hal 5000ms idi.)
-    private static final long MIN_INTERVAL_MS = 1200;
+    private static final long MIN_INTERVAL_MS = 300;
     private final Object rateLock = new Object();
     private long lastCallMs = 0;
 
-    //  TTL cleanup (RAM şişmesin)
+    // ✅ TTL cleanup (RAM şişmesin)
     private static final long TTL_MS = 2L * 60L * 60L * 1000L; // 2 saat
-    private static final int MAX_QUEUE_PER_USER = 20;          // user flood engeli
-    private static final int MAX_QUEUE_GLOBAL = 500;           // global flood engeli
 
     public QueueService(GeminiService geminiService) {
         this.geminiService = geminiService;
@@ -59,23 +57,13 @@ public class QueueService {
     // Producer
     public String addToQueue(String clientId, String promptText) {
 
-        // global limit
-        if (tickets.size() > MAX_QUEUE_GLOBAL) {
-            // çok doluysa request reddetmek daha sağlıklı
-            throw new RuntimeException("Queue is full");
-        }
-
         userQueues.putIfAbsent(clientId, new ConcurrentLinkedQueue<>());
         ConcurrentLinkedQueue<String> q = userQueues.get(clientId);
-
-        if (q.size() >= MAX_QUEUE_PER_USER) {
-            throw new RuntimeException("Too many pending requests for this user");
-        }
 
         String ticketId = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
 
-        tickets.put(ticketId, new TicketState(clientId, TicketState.Status.PROCESSING, null, now));
+        tickets.put(ticketId, new TicketState(clientId, TicketState.Status.QUEUED, null, now));
         ticketPrompts.put(ticketId, promptText);
 
         q.add(ticketId);
@@ -88,7 +76,7 @@ public class QueueService {
         return ticketId;
     }
 
-    //  Owner check (çok kullanıcı için kritik)
+    // ✅ Owner check (çok kullanıcı için kritik)
     public TicketState getTicket(String clientId, String ticketId) {
         TicketState st = tickets.get(ticketId);
         if (st == null) return null;
@@ -131,6 +119,11 @@ public class QueueService {
         }
 
         // işi worker’a ver
+        TicketState current = tickets.get(ticketId);
+        if (current != null) {
+            tickets.put(ticketId, current.withStatus(TicketState.Status.PROCESSING, null));
+        }
+
         executor.submit(() -> {
             try {
                 processOne(ticketId);
@@ -149,7 +142,7 @@ public class QueueService {
         }
 
         try {
-            //  global rate-limit
+            // ✅ global rate-limit
             synchronized (rateLock) {
                 long now = System.currentTimeMillis();
                 long wait = MIN_INTERVAL_MS - (now - lastCallMs);

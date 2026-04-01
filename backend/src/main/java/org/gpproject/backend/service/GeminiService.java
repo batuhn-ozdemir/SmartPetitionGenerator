@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import okhttp3.*;
 import org.gpproject.backend.model.GeminiRequest;
+import org.gpproject.backend.model.OcrLayoutResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -40,7 +41,9 @@ public class GeminiService {
 
     private static final List<String> MODEL_FALLBACK_ORDER = Arrays.asList(
             //"gemini-2.5-pro"
-            "gemini-2.5-flash-lite"
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-1.5-flash"
     );
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -57,7 +60,6 @@ public class GeminiService {
     }
 
     public String callGemini(String userText) {
-
         String currentDate = LocalDate.now(ZoneId.of("Europe/Istanbul"))
                 .format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
 
@@ -105,6 +107,14 @@ public class GeminiService {
           When generating the body content in FINAL_BUILD, DO NOT copy-paste the user's raw input.
           Weave it into flowing, highly formal, and continuous Turkish sentences.
           NEVER use "..." or "___" placeholders.
+          
+        --- 4.1 SAFETY / SCOPE GATE (CRITICAL) ---
+        You are ONLY a petition generator.
+        If user asks for dangerous/abusive content (e.g., key theft, personal data exfiltration, hacking, bypass, unauthorized access), return EXACTLY:
+        REJECT_SECURITY
+        If user input is benign but outside petition scope (e.g., math/chat/general Q&A like "2+2 kaçtır"), return EXACTLY:
+        REJECT_OUT_OF_SCOPE
+        Do not add extra words in these two rejection cases.
 
         --- 5. A4 LAYOUT & POSITIONING ---
         You MUST use this EXACT HTML structure for the output:
@@ -225,6 +235,9 @@ public class GeminiService {
                 if (cleanText.trim().equals("REJECT_SECURITY")) {
                     return generateErrorJson("Güvenlik Reddi: Lütfen sadece resmi yazışma konuları giriniz.");
                 }
+                if (cleanText.trim().equals("REJECT_OUT_OF_SCOPE")) {
+                    return generateErrorJson("Görev dışı işlem: Bu servis yalnızca dilekçe oluşturma taleplerini işler.");
+                }
 
                 cleanText = extractJsonIfAny(cleanText);
 
@@ -244,6 +257,178 @@ public class GeminiService {
         }
 
         return generateErrorJson(lastError);
+    }
+
+    public OcrLayoutResponse analyzeDocumentLayout(String imageBase64, String mimeType) {
+        if (imageBase64 == null || imageBase64.isBlank()) {
+            return new OcrLayoutResponse(false, "EMPTY_IMAGE", "Fotoğraf gönderilemedi.", 0.0, false, 0, 0, List.of());
+        }
+
+        String resolvedMime = (mimeType == null || mimeType.isBlank()) ? "image/jpeg" : mimeType.trim();
+        String prompt = """
+                You are a strict Turkish petition document analyzer.
+                Analyze the provided image and return ONLY a single JSON object.
+
+                Tasks:
+                1) Detect whether there is a readable paper/document in the photo.
+                2) Estimate image/readability quality. If blurry/too dark/not readable => success=false and errorCode=LOW_QUALITY.
+                3) Determine whether the document is a Turkish petition-like document (dilekçe): typically recipient header at top, body paragraphs in middle, personal/contact/signature info near bottom.
+                4) Extract only meaningful petition text lines with bounding boxes in ORIGINAL image pixel coordinates.
+                  - Ignore non-text objects (logos, amblems, stamps, seals, decorative lines, icons).
+                  - Ignore signature scribbles/paraphs that are not readable text.
+                  - Ignore pure graphic handwriting strokes that do not form readable words.
+                  - First detect the main petition block area (ROI). Exclude side notes, page-edge artifacts, camera UI remnants, and background clutter outside this block.
+                  - Keep at most 1-2 tolerance lines above and below the main petition block if clearly related; otherwise discard surrounding text.
+                  - Keep petition section texts (recipient, subject, body, request/result, date, typed name/contact) if readable.
+                  - Respect official petition formatting signals from standard templates:
+                    * Institution and recipient lines are usually centered at top.
+                    * Body paragraphs are generally left-aligned / justified with regular line spacing.
+                    * Signature/date/contact block is generally in lower part, often right/left separated.
+                  - Preserve each detected line as seen on page; do not merge far-apart lines into one box.
+                  - If one sentence naturally continues to next OCR line, keep as consecutive lines (do not force one-line truncation).
+
+                Output JSON schema:
+                {
+                  "success": boolean,
+                  "errorCode": "LOW_QUALITY|NOT_DOCUMENT|NOT_PETITION|PARSING_ERROR|null",
+                  "errorMessage": "string or null",
+                  "confidence": number,
+                  "petition": boolean,
+                  "imageWidth": number,
+                  "imageHeight": number,
+                  "lines": [
+                    {
+                      "text": "string",
+                      "leftPx": number,
+                      "topPx": number,
+                      "widthPx": number,
+                      "heightPx": number,
+                      "writingType": "PRINTED|HANDWRITTEN"
+                    }
+                  ]
+                }
+
+                Rules:
+                - If confidence < 0.68 for readability or text mostly unreadable, return success=false and LOW_QUALITY.
+                - If no paper detected, return success=false and NOT_DOCUMENT.
+                - If paper exists but not a petition-like content, return success=false and NOT_PETITION.
+                - Preserve physical reading order from top to bottom, left to right.
+                - Return coordinates exactly based on what is seen in the image (no synthetic re-layout).
+                - Never include markdown or explanation, JSON only.
+                """;
+
+        JsonObject requestBody = new JsonObject();
+        JsonArray contents = new JsonArray();
+        JsonObject userContent = new JsonObject();
+        userContent.addProperty("role", "user");
+        JsonArray parts = new JsonArray();
+
+        JsonObject textPart = new JsonObject();
+        textPart.addProperty("text", prompt);
+        parts.add(textPart);
+
+        JsonObject imagePart = new JsonObject();
+        JsonObject inlineData = new JsonObject();
+        inlineData.addProperty("mime_type", resolvedMime);
+        inlineData.addProperty("data", imageBase64);
+        imagePart.add("inline_data", inlineData);
+        parts.add(imagePart);
+
+        userContent.add("parts", parts);
+        contents.add(userContent);
+        requestBody.add("contents", contents);
+
+        JsonObject generationConfig = new JsonObject();
+        generationConfig.addProperty("temperature", 0.1);
+        generationConfig.addProperty("maxOutputTokens", 3500);
+        requestBody.add("generationConfig", generationConfig);
+
+        String body = gson.toJson(requestBody);
+        String lastError = "Belge analizi başarısız oldu.";
+
+        for (String modelName : MODEL_FALLBACK_ORDER) {
+            long backoffMs = 800;
+            int attemptsPerModel = Math.max(2, apiKeys.size());
+
+            for (int i = 0; i < attemptsPerModel; i++) {
+                String apiKey = getNextApiKey();
+                String fullUrl = GEMINI_URL_TEMPLATE.formatted(modelName) + "?key=" + apiKey;
+
+                Request request = new Request.Builder()
+                        .url(fullUrl)
+                        .post(RequestBody.create(body, MediaType.get("application/json")))
+                        .build();
+
+                try (Response response = client.newCall(request).execute()) {
+                    int code = response.code();
+
+                    if (!response.isSuccessful()) {
+                        String responseBody = response.body() != null ? response.body().string() : "";
+                        String providerError = extractProviderErrorMessage(responseBody);
+
+                        if (code == 429) {
+                            long retryAfterMs = parseRetryDelayMs(response, providerError, backoffMs);
+                            lastError = providerError.isBlank()
+                                    ? "İstek sınırına ulaşıldı. Lütfen birkaç saniye sonra tekrar deneyin."
+                                    : providerError;
+                            sleepQuietly(retryAfterMs);
+                            backoffMs = Math.min(backoffMs * 2, 5000);
+                            continue;
+                        }
+
+                        if (code == 413) {
+                            String message = providerError.isBlank()
+                                    ? "Görsel boyutu servis limitini aştı."
+                                    : providerError;
+                            return new OcrLayoutResponse(false, "PAYLOAD_TOO_LARGE", message, 0.0, false, 0, 0, List.of());
+                        }
+
+                        if (code >= 500) {
+                            lastError = providerError.isBlank() ? "Belge analizi için servis hatası: " + code : providerError;
+                            sleepQuietly(backoffMs);
+                            backoffMs = Math.min(backoffMs * 2, 5000);
+                            continue;
+                        }
+
+                        lastError = providerError.isBlank()
+                                ? "Belge analizi için servis hatası: " + code
+                                : providerError;
+                        continue;
+                    }
+
+
+                    String responseBody = response.body() != null ? response.body().string() : "";
+                    JsonObject root = JsonParser.parseString(responseBody).getAsJsonObject();
+                    String aiRaw = root.getAsJsonArray("candidates")
+                            .get(0).getAsJsonObject()
+                            .getAsJsonObject("content")
+                            .getAsJsonArray("parts")
+                            .get(0).getAsJsonObject()
+                            .get("text").getAsString();
+
+                    String clean = extractJsonIfAny(
+                            aiRaw.replace("```json", "").replace("```", "").trim()
+                    );
+
+                    JsonObject result = JsonParser.parseString(clean).getAsJsonObject();
+                    return gson.fromJson(result, OcrLayoutResponse.class);
+                } catch (Exception ex) {
+                    lastError = "Belge analizi cevabı okunamadı.";
+                    sleepQuietly(backoffMs);
+                    backoffMs = Math.min(backoffMs * 2, 5000);
+                }
+
+
+            }
+        }
+
+        if (lastError.toLowerCase(Locale.ROOT).contains("quota")
+                || lastError.toLowerCase(Locale.ROOT).contains("resource exhausted")
+                || lastError.contains("429")) {
+            return new OcrLayoutResponse(false, "RATE_LIMITED", lastError, 0.0, false, 0, 0, List.of());
+        }
+
+        return new OcrLayoutResponse(false, "PARSING_ERROR", lastError, 0.0, false, 0, 0, List.of());
     }
 
     // ---------- Helpers ----------
@@ -272,6 +457,40 @@ public class GeminiService {
             // no-op
         }
         return "";
+    }
+
+    private long parseRetryDelayMs(Response response, String providerError, long fallbackMs) {
+        String retryHeader = response.header("Retry-After");
+        if (retryHeader != null) {
+            try {
+                long sec = Long.parseLong(retryHeader.trim());
+                if (sec > 0) return sec * 1000L;
+            } catch (Exception ignored) {
+                // no-op
+            }
+        }
+
+        if (providerError != null && !providerError.isBlank()) {
+            Matcher matcher = Pattern.compile("(?i)(\\d+)\\s*(saniye|seconds?)").matcher(providerError);
+            if (matcher.find()) {
+                try {
+                    return Long.parseLong(matcher.group(1)) * 1000L;
+                } catch (Exception ignored) {
+                    // no-op
+                }
+            }
+        }
+
+        return Math.max(500L, fallbackMs);
+    }
+
+    private void sleepQuietly(long delayMs) {
+        if (delayMs <= 0) return;
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private String normalizeDraftJson(String json, String currentDate, String userText) {
@@ -530,8 +749,15 @@ public class GeminiService {
 
     private String normalizeErrorMessage(String msg) {
         String m = msg == null ? "" : msg.toLowerCase(Locale.ROOT);
-        if (m.contains("güvenlik") || m.contains("security") || m.contains("reject")) {
-            return "Şüpheli işlem algılandı. Lütfen talebinizi resmi dilekçe formatında yeniden giriniz.";
+        if (m.contains("şüpheli") || m.contains("supheli")
+                || m.contains("güvenlik") || m.contains("security") || m.contains("reject")
+                || m.contains("api key") || m.contains("api_key") || m.contains("anahtar")) {
+            return "Şüpheli işlem. Lütfen talebinizi resmi dilekçe formatında yeniden giriniz.";
+        }
+        if (m.contains("görev dışı") || m.contains("gorev disi")
+                || m.contains("out_of_scope") || m.contains("out of scope")
+                || m.contains("yalnızca dilekçe") || m.contains("yalnizca dilekce")) {
+            return "Görev dışı işlem: Bu servis yalnızca dilekçe oluşturma taleplerini işler.";
         }
         return "İşlem şu anda tamamlanamadı. Lütfen tekrar deneyiniz.";
     }

@@ -2,7 +2,7 @@ package org.gpproject.backend.service;
 
 public class TicketState {
 
-    public enum Status { PROCESSING, COMPLETED, FAILED }
+    public enum Status { QUEUED, PROCESSING, COMPLETED, FAILED }
 
     private final String ownerClientId;
     private final Status status;
