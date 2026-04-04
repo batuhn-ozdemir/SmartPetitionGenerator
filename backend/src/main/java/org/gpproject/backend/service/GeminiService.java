@@ -14,11 +14,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.TimeUnit;
@@ -274,6 +270,8 @@ public class GeminiService {
                 3) Determine whether the document is a Turkish petition-like document (dilekçe): typically recipient header at top, body paragraphs in middle, personal/contact/signature info near bottom.
                 4) Extract only meaningful petition text lines with bounding boxes in ORIGINAL image pixel coordinates.
                   - Ignore non-text objects (logos, amblems, stamps, seals, decorative lines, icons).
+                  - Dotted blanks used for manual filling (e.g., "Ad Soyad: ............") are valid petition text and MUST be kept.
+                  - For long dotted blanks, preserve intent but normalize very long dot runs to short placeholder form ("...").
                   - Ignore signature scribbles/paraphs that are not readable text.
                   - Ignore pure graphic handwriting strokes that do not form readable words.
                   - First detect the main petition block area (ROI). Exclude side notes, page-edge artifacts, camera UI remnants, and background clutter outside this block.
@@ -412,12 +410,16 @@ public class GeminiService {
                             .get(0).getAsJsonObject()
                             .get("text").getAsString();
 
-                    String clean = extractJsonIfAny(
-                            aiRaw.replace("```json", "").replace("```", "").trim()
-                    );
+                    OcrLayoutResponse parsed = parseOcrLayoutFromModelText(aiRaw);
+                    if (parsed == null) {
+                        lastError = "Belge analizi cevabı JSON formatında alınamadı.";
+                        sleepQuietly(backoffMs);
+                        backoffMs = Math.min(backoffMs * 2, 5000);
+                        continue;
+                    }
 
-                    JsonObject result = JsonParser.parseString(clean).getAsJsonObject();
-                    return gson.fromJson(result, OcrLayoutResponse.class);
+                    normalizeDottedPlaceholders(parsed);
+                    return parsed;
                 } catch (Exception ex) {
                     lastError = "Belge analizi cevabı okunamadı.";
                     sleepQuietly(backoffMs);
@@ -488,6 +490,95 @@ public class GeminiService {
         }
 
         return Math.max(500L, fallbackMs);
+    }
+
+    private void normalizeDottedPlaceholders(OcrLayoutResponse response) {
+        if (response == null || response.getLines() == null || response.getLines().isEmpty()) return;
+
+        for (OcrLayoutResponse.OcrLine line : response.getLines()) {
+            if (line == null) continue;
+            String text = line.getText();
+            if (text == null || text.isBlank()) continue;
+
+            line.setText(
+                    text
+                            .replaceAll("…{1,}", "...")
+                            .replaceAll("(?:\\s*[\\.·•]){4,}", "...")
+                            .replaceAll("\\.{4,}", "...")
+                            .replaceAll("_{3,}", "___")
+            );
+        }
+    }
+
+    private OcrLayoutResponse parseOcrLayoutFromModelText(String aiRaw) {
+        if (aiRaw == null || aiRaw.isBlank()) return null;
+
+        String normalized = aiRaw
+                .replace("```json", "")
+                .replace("```", "")
+                .replace('\u201c', '"')
+                .replace('\u201d', '"')
+                .replace('\u2018', '\'')
+                .replace('\u2019', '\'')
+                .trim();
+
+        List<String> candidates = new ArrayList<>();
+        candidates.add(extractJsonIfAny(normalized));
+        String balanced = extractFirstJsonObject(normalized);
+        if (!balanced.isBlank()) candidates.add(balanced);
+
+        for (String candidate : candidates) {
+            try {
+                if (candidate == null || candidate.isBlank()) continue;
+                JsonObject result = JsonParser.parseString(candidate).getAsJsonObject();
+                return gson.fromJson(result, OcrLayoutResponse.class);
+            } catch (Exception ignored) {
+                // try next candidate
+            }
+        }
+
+        return null;
+    }
+
+    private String extractFirstJsonObject(String text) {
+        if (text == null || text.isBlank()) return "";
+        int start = text.indexOf('{');
+        if (start < 0) return "";
+
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = start; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (ch == '\\') {
+                    escaped = true;
+                    continue;
+                }
+                if (ch == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (ch == '"') {
+                inString = true;
+                continue;
+            }
+
+            if (ch == '{') depth++;
+            if (ch == '}') {
+                depth--;
+                if (depth == 0) {
+                    return text.substring(start, i + 1).trim();
+                }
+            }
+        }
+        return "";
     }
 
     private void sleepQuietly(long delayMs) {
