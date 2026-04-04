@@ -42,8 +42,7 @@ public class GeminiService {
     private static final List<String> MODEL_FALLBACK_ORDER = Arrays.asList(
             //"gemini-2.5-pro"
             "gemini-2.5-flash-lite",
-            "gemini-2.5-flash",
-            "gemini-1.5-flash"
+            "gemini-2.5-flash"
     );
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -387,6 +386,13 @@ public class GeminiService {
                             lastError = providerError.isBlank() ? "Belge analizi için servis hatası: " + code : providerError;
                             sleepQuietly(backoffMs);
                             backoffMs = Math.min(backoffMs * 2, 5000);
+                            continue;
+                        }
+
+                        if (code == 400 || code == 403 || code == 404) {
+                            lastError = providerError.isBlank()
+                                    ? "Model desteklenmiyor veya erişim izni yok: " + modelName
+                                    : providerError;
                             continue;
                         }
 
