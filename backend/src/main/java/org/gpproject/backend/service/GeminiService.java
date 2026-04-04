@@ -36,9 +36,9 @@ public class GeminiService {
             "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent";
 
     private static final List<String> MODEL_FALLBACK_ORDER = Arrays.asList(
-            //"gemini-2.5-pro"
-            "gemini-2.5-flash-lite",
-            "gemini-2.5-flash"
+            //"gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite"
     );
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -268,14 +268,19 @@ public class GeminiService {
                 1) Detect whether there is a readable paper/document in the photo.
                 2) Estimate image/readability quality. If blurry/too dark/not readable => success=false and errorCode=LOW_QUALITY.
                 3) Determine whether the document is a Turkish petition-like document (dilekçe): typically recipient header at top, body paragraphs in middle, personal/contact/signature info near bottom.
-                4) Extract only meaningful petition text lines with bounding boxes in ORIGINAL image pixel coordinates.
-                  - Ignore non-text objects (logos, amblems, stamps, seals, decorative lines, icons).
+                4) Extract all readable petition text lines with bounding boxes in ORIGINAL image pixel coordinates.
+                  - Keep every readable line that belongs to the document content (header/body/footer/contact/date/signature-name lines).
+                  - Ignore only non-text objects (logos, amblems, stamps, seals, decorative lines, icons).
                   - Dotted blanks used for manual filling (e.g., "Ad Soyad: ............") are valid petition text and MUST be kept.
-                  - For long dotted blanks, preserve intent but normalize very long dot runs to short placeholder form ("...").
-                  - Ignore signature scribbles/paraphs that are not readable text.
+                  - Preserve dotted/underscored manual fill placeholders, but normalize any dot run longer than 3 to exactly "..." in output text.
+                  - Do NOT hallucinate additional dotted placeholder lines that are not visible in the image.
+                  - Never emit a multi-line continuous dotted block. Keep each dotted placeholder on its own original line.
+                  - If text is underlined in the image, return it as normal plain text (no markdown, no HTML underline tags).
+                  - Keep handwritten words if they are readable.
+                  - Ignore signature scribbles/paraphs only if not readable text.
                   - Ignore pure graphic handwriting strokes that do not form readable words.
                   - First detect the main petition block area (ROI). Exclude side notes, page-edge artifacts, camera UI remnants, and background clutter outside this block.
-                  - Keep at most 1-2 tolerance lines above and below the main petition block if clearly related; otherwise discard surrounding text.
+                  - Keep tolerance lines above and below the main petition block if clearly related; prefer recall over strict pruning.
                   - Keep petition section texts (recipient, subject, body, request/result, date, typed name/contact) if readable.
                   - Respect official petition formatting signals from standard templates:
                     * Institution and recipient lines are usually centered at top.
@@ -337,7 +342,8 @@ public class GeminiService {
 
         JsonObject generationConfig = new JsonObject();
         generationConfig.addProperty("temperature", 0.1);
-        generationConfig.addProperty("maxOutputTokens", 3500);
+        generationConfig.addProperty("maxOutputTokens", 8192);
+        generationConfig.addProperty("responseMimeType", "application/json");
         requestBody.add("generationConfig", generationConfig);
 
         String body = gson.toJson(requestBody);
@@ -412,7 +418,12 @@ public class GeminiService {
 
                     OcrLayoutResponse parsed = parseOcrLayoutFromModelText(aiRaw);
                     if (parsed == null) {
-                        lastError = "Belge analizi cevabı JSON formatında alınamadı.";
+                        OcrLayoutResponse fallback = fallbackLayoutFromRawText(aiRaw);
+                        if (fallback != null) {
+                            normalizeDottedPlaceholders(fallback);
+                            return fallback;
+                        }
+                        lastError = "Belge analizi cevabı işlenemedi.";
                         sleepQuietly(backoffMs);
                         backoffMs = Math.min(backoffMs * 2, 5000);
                         continue;
@@ -436,7 +447,7 @@ public class GeminiService {
             return new OcrLayoutResponse(false, "RATE_LIMITED", lastError, 0.0, false, 0, 0, List.of());
         }
 
-        return new OcrLayoutResponse(false, "PARSING_ERROR", lastError, 0.0, false, 0, 0, List.of());
+        return new OcrLayoutResponse(false, "LOW_QUALITY", "Belge okunamadı, lütfen daha net bir fotoğraf deneyin.", 0.0, false, 0, 0, List.of());
     }
 
     // ---------- Helpers ----------
@@ -500,15 +511,88 @@ public class GeminiService {
             String text = line.getText();
             if (text == null || text.isBlank()) continue;
 
-            line.setText(
-                    text
-                            .replaceAll("…{1,}", "...")
-                            .replaceAll("(?:\\s*[\\.·•]){4,}", "...")
-                            .replaceAll("\\.{4,}", "...")
-                            .replaceAll("_{3,}", "___")
-            );
+            String normalized = text
+                    .replace('…', '.')
+                    .replace('·', '.')
+                    .replace('•', '.')
+                    .replace('‧', '.')
+                    .replace('․', '.');
+
+            // 3'ten fazla nokta tek biçimde "..." olarak normalize edilir.
+            normalized = normalized
+                    .replaceAll("\\.{4,}", "...")
+                    .replaceAll("_{121,}", repeatChar('_', 60));
+
+            line.setText(normalized);
         }
     }
+
+    private OcrLayoutResponse fallbackLayoutFromRawText(String aiRaw) {
+        if (aiRaw == null || aiRaw.isBlank()) return null;
+
+        String cleaned = aiRaw
+                .replace("```json", "")
+                .replace("```", "")
+                .trim();
+
+        List<OcrLayoutResponse.OcrLine> lines = new ArrayList<>();
+
+        Matcher textFieldMatcher = Pattern.compile("\"text\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"").matcher(cleaned);
+        int top = 40;
+        while (textFieldMatcher.find()) {
+            String lineText = textFieldMatcher.group(1)
+                    .replace("\\n", " ")
+                    .replace("\\r", " ")
+                    .replace("\\t", " ")
+                    .replace("\\\"", "\"")
+                    .trim();
+            if (lineText.isBlank()) continue;
+            lines.add(new OcrLayoutResponse.OcrLine(lineText, 40, top, Math.max(200, lineText.length() * 8), 22, "PRINTED"));
+            top += 28;
+        }
+
+        if (lines.isEmpty()) {
+            String[] rawLines = cleaned.split("\\R+");
+            top = 40;
+            for (String raw : rawLines) {
+                String lineText = raw
+                        .replaceAll("[\\{\\}\\[\\]\"]", " ")
+                        .replaceAll("\\s+", " ")
+                        .trim();
+                if (lineText.isBlank()) continue;
+                if (lineText.startsWith("success") || lineText.startsWith("errorCode")
+                        || lineText.startsWith("errorMessage") || lineText.startsWith("confidence")
+                        || lineText.startsWith("petition") || lineText.startsWith("imageWidth")
+                        || lineText.startsWith("imageHeight") || lineText.startsWith("lines")) {
+                    continue;
+                }
+                lines.add(new OcrLayoutResponse.OcrLine(lineText, 40, top, Math.max(200, lineText.length() * 8), 22, "PRINTED"));
+                top += 28;
+                if (lines.size() >= 120) break;
+            }
+        }
+
+        if (lines.isEmpty()) return null;
+
+        return new OcrLayoutResponse(
+                true,
+                null,
+                null,
+                0.55,
+                true,
+                1200,
+                Math.max(1600, 60 + (lines.size() * 28)),
+                lines
+        );
+    }
+
+    private String repeatChar(char ch, int count) {
+        if (count <= 0) return "";
+        StringBuilder sb = new StringBuilder(count);
+        for (int i = 0; i < count; i++) sb.append(ch);
+        return sb.toString();
+    }
+
 
     private OcrLayoutResponse parseOcrLayoutFromModelText(String aiRaw) {
         if (aiRaw == null || aiRaw.isBlank()) return null;
@@ -526,6 +610,8 @@ public class GeminiService {
         candidates.add(extractJsonIfAny(normalized));
         String balanced = extractFirstJsonObject(normalized);
         if (!balanced.isBlank()) candidates.add(balanced);
+        String repaired = repairLikelyJson(extractJsonIfAny(normalized));
+        if (!repaired.isBlank()) candidates.add(repaired);
 
         for (String candidate : candidates) {
             try {
@@ -538,6 +624,14 @@ public class GeminiService {
         }
 
         return null;
+    }
+
+    private String repairLikelyJson(String text) {
+        if (text == null || text.isBlank()) return "";
+        return text
+                .replaceAll(",\\s*([}\\]])", "$1")
+                .replaceAll("[\\u0000-\\u001F&&[^\\n\\r\\t]]", " ")
+                .trim();
     }
 
     private String extractFirstJsonObject(String text) {
