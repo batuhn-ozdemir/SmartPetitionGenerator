@@ -35,7 +35,11 @@ public class GeminiService {
     private static final String GEMINI_URL_TEMPLATE =
             "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent";
 
-    private static final List<String> MODEL_FALLBACK_ORDER = Arrays.asList(
+    private static final List<String> TEXT_MODEL_FALLBACK_ORDER = List.of(
+            "gemini-2.5-flash-lite"
+    );
+
+    private static final List<String> OCR_MODEL_FALLBACK_ORDER = Arrays.asList(
             //"gemini-2.5-pro",
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite"
@@ -163,13 +167,13 @@ public class GeminiService {
         String jsonBody = gson.toJson(requestBody);
 
         int retriesPerModel = apiKeys.size() * 2;
-        int maxAttempts = retriesPerModel * MODEL_FALLBACK_ORDER.size();
+        int maxAttempts = retriesPerModel * TEXT_MODEL_FALLBACK_ORDER.size();
         long backoffMs = 500;
 
         String lastError = "Sunucu Hatası: Tüm denemeler başarısız oldu.";
 
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            String modelName = MODEL_FALLBACK_ORDER.get(attempt % MODEL_FALLBACK_ORDER.size());
+            String modelName = TEXT_MODEL_FALLBACK_ORDER.get(attempt % TEXT_MODEL_FALLBACK_ORDER.size());
 
             String currentKey = getNextApiKey();
             String fullUrl = GEMINI_URL_TEMPLATE.formatted(modelName) + "?key=" + currentKey;
@@ -349,7 +353,7 @@ public class GeminiService {
         String body = gson.toJson(requestBody);
         String lastError = "Belge analizi başarısız oldu.";
 
-        for (String modelName : MODEL_FALLBACK_ORDER) {
+        for (String modelName : OCR_MODEL_FALLBACK_ORDER) {
             long backoffMs = 800;
             int attemptsPerModel = Math.max(2, apiKeys.size());
 

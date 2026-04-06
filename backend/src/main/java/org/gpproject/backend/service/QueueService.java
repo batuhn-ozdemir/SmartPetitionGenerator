@@ -26,7 +26,7 @@ public class QueueService {
     private final Set<String> usersInRoundRobin = ConcurrentHashMap.newKeySet();
 
     // ✅ Worker pool (aynı anda kaç Gemini çağrısı)
-    private static final int MAX_CONCURRENT_WORKERS = 4; // ihtiyaca göre 1-4
+    private static final int MAX_CONCURRENT_WORKERS = 2; // ihtiyaca göre 1-4
     private final Semaphore workerPermits = new Semaphore(MAX_CONCURRENT_WORKERS);
 
     private final ExecutorService executor = Executors.newFixedThreadPool(
@@ -43,7 +43,7 @@ public class QueueService {
 
     // ✅ Rate limit (global). Gemini kota/rate için.
     // Örn: 1200ms => ~0.8 req/s. (Senin eski hal 5000ms idi.)
-    private static final long MIN_INTERVAL_MS = 300;
+    private static final long MIN_INTERVAL_MS = 1200;
     private final Object rateLock = new Object();
     private long lastCallMs = 0;
 
