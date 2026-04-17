@@ -9,12 +9,15 @@ import androidx.compose.foundation.layout.*
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.FormatAlignCenter
 import androidx.compose.material.icons.filled.FormatAlignJustify
 import androidx.compose.material.icons.filled.FormatAlignLeft
 import androidx.compose.material.icons.filled.FormatAlignRight
 import androidx.compose.material.icons.filled.FormatBold
+import androidx.compose.material.icons.filled.FormatIndentIncrease
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -70,6 +73,8 @@ fun PreviewScreen(
     var isTemplateSaveInProgress by remember { mutableStateOf(false) }
     var hasAutoShared by remember(petitionId, openShareOnLaunch) { mutableStateOf(false) }
     var lastLoadedHtml by remember { mutableStateOf<String?>(null) }
+    var editorFontSizePt by remember { mutableStateOf(12f) }
+    var editorLineHeight by remember { mutableStateOf(1.35f) }
     val density = LocalDensity.current
 
     LaunchedEffect(petitionId, previewHtml) {
@@ -334,11 +339,77 @@ fun PreviewScreen(
                     e.preventDefault();
                 }
             };
+            
+            const findEditableBlock = function(node) {
+                let block = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
+                while (block && block !== document.body) {
+                    const tag = (block.tagName || '').toUpperCase();
+                    if (['P', 'DIV', 'LI', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(tag)) {
+                        return block;
+                    }
+                    block = block.parentElement;
+                }
+                return null;
+            };
+
+            const isCaretAtBlockStart = function(sel, block) {
+                if (!sel || !block || sel.rangeCount === 0 || !sel.isCollapsed) return false;
+                const caretRange = sel.getRangeAt(0).cloneRange();
+                const preRange = caretRange.cloneRange();
+                preRange.selectNodeContents(block);
+                preRange.setEnd(caretRange.startContainer, caretRange.startOffset);
+                const beforeText = (preRange.toString() || '').replace(/\u00A0/g, ' ');
+                return beforeText.length === 0;
+            };
+
+            const trimOneLeadingSpace = function(block) {
+                if (!block) return false;
+                const html = block.innerHTML || '';
+                const next = html
+                    .replace(/^(&nbsp;|\u00A0| )/, '')
+                    .replace(/^(<br\s*\/?>)(?:&nbsp;|\u00A0| )/, '$1');
+                if (next !== html) {
+                    block.innerHTML = next;
+                    return true;
+                }
+                return false;
+            };
 
             document.onkeydown = function(e) {
                 if (!e) return;
+                if (e.key === 'Backspace' || e.keyCode === 8) {
+                    const sel = window.getSelection && window.getSelection();
+                    const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+                    const block = range ? findEditableBlock(range.startContainer) : null;
+                    if (sel && block && isCaretAtBlockStart(sel, block)) {
+                        const currentIndent = parseFloat(block.style.textIndent || '0');
+                        if (isFinite(currentIndent) && currentIndent > 0) {
+                            e.preventDefault();
+                            const nextIndent = Math.max(0, currentIndent - 1);
+                            block.style.textIndent = nextIndent > 0 ? (nextIndent + 'em') : '0';
+                            markDirty();
+                            setTimeout(keepCaretVisible, 0);
+                            return;
+                        }
+                        if (trimOneLeadingSpace(block)) {
+                            e.preventDefault();
+                            markDirty();
+                            setTimeout(keepCaretVisible, 0);
+                            return;
+                        }
+                    }
+                }
                 if ((e.key === 'Enter' || e.keyCode === 13) && (isOverflowing() || hardLimitReached())) {
                     e.preventDefault();
+                    return;
+                }
+                if (e.key === 'Enter' || e.keyCode === 13) {
+                    e.preventDefault();
+                    try {
+                        document.execCommand('insertParagraph', false, null);
+                    } catch (err) {
+                        document.execCommand('insertLineBreak', false, null);
+                    }
                 }
                 setTimeout(keepCaretVisible, 0);
             };
@@ -519,6 +590,21 @@ fun PreviewScreen(
                 try {
                     document.execCommand('$command', false, null);
                     const sel = window.getSelection && window.getSelection();
+                    if ('${'$'}command' === 'justifyLeft' && sel && sel.rangeCount > 0) {
+                        const rangeForIndentReset = sel.getRangeAt(0);
+                        const startNode = rangeForIndentReset.startContainer;
+                        let block = startNode && startNode.nodeType === 1 ? startNode : (startNode ? startNode.parentElement : null);
+                        while (block && block !== document.body) {
+                            const tag = (block.tagName || '').toUpperCase();
+                            if (['P', 'DIV', 'LI', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(tag)) {
+                                break;
+                            }
+                            block = block.parentElement;
+                        }
+                        if (block && block !== document.body) {
+                            block.style.textIndent = '0';
+                        }
+                    }
                     if (sel && sel.rangeCount > 0) {
                         const range = sel.getRangeAt(0);
                         range.collapse(false);
@@ -529,6 +615,103 @@ fun PreviewScreen(
                         window.AndroidEditBridge.onContentChanged();
                     }
                 } catch (e) {}
+            })();
+            """.trimIndent(),
+            null
+        )
+    }
+
+    fun autoIndentCurrentLine() {
+        if (!isEditMode) return
+        webViewRef?.evaluateJavascript(
+            """
+            (function() {
+                try {
+                    const sel = window.getSelection && window.getSelection();
+                    if (!sel || sel.rangeCount === 0) return;
+
+                    const range = sel.getRangeAt(0);
+                    const startNode = range.startContainer;
+                    let block = startNode && startNode.nodeType === 1 ? startNode : (startNode ? startNode.parentElement : null);
+
+                    while (block && block !== document.body) {
+                        const tag = (block.tagName || '').toUpperCase();
+                        if (['P', 'DIV', 'LI', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(tag)) {
+                            break;
+                        }
+                        block = block.parentElement;
+                    }
+
+                    if (!block || block === document.body) {
+                        block = startNode && startNode.nodeType === 1 ? startNode : (startNode ? startNode.parentElement : null);
+                    }
+
+                    if (!block) return;
+
+                    const currentIndent = parseFloat(block.style.textIndent || '0');
+                    const nextIndent = (!isFinite(currentIndent) || currentIndent <= 0) ? 2 : (currentIndent + 1);
+                    block.style.textIndent = nextIndent + 'em';
+
+                    if (window.AndroidEditBridge && window.AndroidEditBridge.onContentChanged) {
+                        window.AndroidEditBridge.onContentChanged();
+                    }
+                } catch (e) {}
+            })();
+            """.trimIndent(),
+            null
+        )
+    }
+
+    fun syncEditorTypographyState() {
+        webViewRef?.evaluateJavascript(
+            """
+            (function() {
+                const page = document.querySelector('.a4-page') || document.body;
+                const styles = window.getComputedStyle(page);
+                const fontSizePx = parseFloat(styles.fontSize || '16');
+                const lineHeightRaw = styles.lineHeight || '';
+                let lineHeight = parseFloat(lineHeightRaw);
+                if (!isFinite(lineHeight)) {
+                    const fallback = parseFloat(styles.fontSize || '16');
+                    lineHeight = fallback > 0 ? (fontSizePx / fallback) : 1.35;
+                } else {
+                    lineHeight = fontSizePx > 0 ? (lineHeight / fontSizePx) : 1.35;
+                }
+                const fontSizePt = fontSizePx * 0.75;
+                return JSON.stringify({
+                    fontSizePt: Number(fontSizePt.toFixed(2)),
+                    lineHeight: Number(lineHeight.toFixed(2))
+                });
+            })();
+            """.trimIndent()
+        ) { typographyJson ->
+            val parsed = runCatching { Gson().fromJson(typographyJson, String::class.java) }.getOrNull()
+            if (!parsed.isNullOrBlank()) {
+                val obj = runCatching { Gson().fromJson(parsed, Map::class.java) }.getOrNull()
+                val font = (obj?.get("fontSizePt") as? Number)?.toFloat()
+                val line = (obj?.get("lineHeight") as? Number)?.toFloat()
+                if (font != null) editorFontSizePt = font.coerceIn(8f, 24f)
+                if (line != null) editorLineHeight = line.coerceIn(1f, 2.5f)
+            }
+        }
+    }
+
+    fun applyEditorTypography(fontSizePt: Float = editorFontSizePt, lineHeight: Float = editorLineHeight) {
+        if (!isEditMode) return
+        val clampedFont = fontSizePt.coerceIn(8f, 24f)
+        val clampedLine = lineHeight.coerceIn(1f, 2.5f)
+        editorFontSizePt = clampedFont
+        editorLineHeight = clampedLine
+
+        webViewRef?.evaluateJavascript(
+            """
+            (function() {
+                const page = document.querySelector('.a4-page') || document.body;
+                page.style.fontSize = '${"%.2f".format(java.util.Locale.US, clampedFont)}pt';
+                page.style.lineHeight = '${"%.2f".format(java.util.Locale.US, clampedLine)}';
+                if (window.AndroidEditBridge && window.AndroidEditBridge.onContentChanged) {
+                    window.AndroidEditBridge.onContentChanged();
+                }
             })();
             """.trimIndent(),
             null
@@ -596,26 +779,63 @@ fun PreviewScreen(
                 )
 
                 if (isEditMode) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        FilledTonalIconButton(onClick = { runEditorCommand("bold") }) {
-                            Icon(Icons.Default.FormatBold, contentDescription = "Kalın")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilledTonalIconButton(onClick = { runEditorCommand("bold") }) {
+                                Icon(Icons.Default.FormatBold, contentDescription = "Kalın")
+                            }
+                            FilledTonalIconButton(onClick = { runEditorCommand("justifyLeft") }) {
+                                Icon(Icons.Default.FormatAlignLeft, contentDescription = "Sola yasla")
+                            }
+                            FilledTonalIconButton(onClick = { runEditorCommand("justifyCenter") }) {
+                                Icon(Icons.Default.FormatAlignCenter, contentDescription = "Ortala")
+                            }
+                            FilledTonalIconButton(onClick = { runEditorCommand("justifyRight") }) {
+                                Icon(Icons.Default.FormatAlignRight, contentDescription = "Sağa yasla")
+                            }
+                            FilledTonalIconButton(onClick = { runEditorCommand("justifyFull") }) {
+                                Icon(Icons.Default.FormatAlignJustify, contentDescription = "İki yana yasla")
+                            }
+                            FilledTonalIconButton(onClick = { autoIndentCurrentLine() }) {
+                                Icon(Icons.Default.FormatIndentIncrease, contentDescription = "İmleç satırını otomatik girintile")
+                            }
                         }
-                        FilledTonalIconButton(onClick = { runEditorCommand("justifyLeft") }) {
-                            Icon(Icons.Default.FormatAlignLeft, contentDescription = "Sola yasla")
-                        }
-                        FilledTonalIconButton(onClick = { runEditorCommand("justifyCenter") }) {
-                            Icon(Icons.Default.FormatAlignCenter, contentDescription = "Ortala")
-                        }
-                        FilledTonalIconButton(onClick = { runEditorCommand("justifyRight") }) {
-                            Icon(Icons.Default.FormatAlignRight, contentDescription = "Sağa yasla")
-                        }
-                        FilledTonalIconButton(onClick = { runEditorCommand("justifyFull") }) {
-                            Icon(Icons.Default.FormatAlignJustify, contentDescription = "İki yana yasla")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text("Yazı: ${"%.1f".format(editorFontSizePt)}pt")
+                                FilledTonalIconButton(onClick = { applyEditorTypography(editorFontSizePt - 0.5f, editorLineHeight) }) {
+                                    Icon(Icons.Default.Remove, contentDescription = "Yazı boyutunu azalt")
+                                }
+                                FilledTonalIconButton(onClick = { applyEditorTypography(editorFontSizePt + 0.5f, editorLineHeight) }) {
+                                    Icon(Icons.Default.Add, contentDescription = "Yazı boyutunu arttır")
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Text("Satır: ${"%.2f".format(editorLineHeight)}")
+                                FilledTonalIconButton(onClick = { applyEditorTypography(editorFontSizePt, editorLineHeight - 0.05f) }) {
+                                    Icon(Icons.Default.Remove, contentDescription = "Satır aralığını azalt")
+                                }
+                                FilledTonalIconButton(onClick = { applyEditorTypography(editorFontSizePt, editorLineHeight + 0.05f) }) {
+                                    Icon(Icons.Default.Add, contentDescription = "Satır aralığını arttır")
+                                }
+                            }
                         }
                     }
                 }
@@ -642,6 +862,7 @@ fun PreviewScreen(
                             hasUnsavedEdits = isEditMode
                             if (isEditMode) {
                                 webViewRef?.evaluateJavascript(enableBoundedEditScript, null)
+                                syncEditorTypographyState()
                             } else {
                                 webViewRef?.evaluateJavascript(disableBoundedEditScript) { htmlResult ->
                                     val cleanInnerHtml = try {

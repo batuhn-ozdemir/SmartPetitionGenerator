@@ -6,6 +6,8 @@ import android.net.Uri
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +44,7 @@ import com.gpproject.smartpetitiongenerator.ui.viewmodel.GeminiOcrPreviewResult
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.PetitionViewModel
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.Locale
 
 @Composable
@@ -54,13 +57,15 @@ fun ScanToPreviewScreen(
 
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
     var selectedImageBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("Fotoğraf çekin veya galeriden seçip OCR başlatın.") }
     var warningText by remember { mutableStateOf<String?>(null) }
 
     val pickImageLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
+        viewModel.clearCurrentPreview()
         selectedImageUri = uri
         selectedImageBytes = null
         statusText = if (uri != null) {
@@ -72,15 +77,18 @@ fun ScanToPreviewScreen(
     }
 
     val takePhotoLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview()
-    ) { bitmap ->
-        selectedImageUri = null
-        selectedImageBytes = bitmap?.toJpegBytes()
-        statusText = if (bitmap != null) {
-            "Fotoğraf çekildi. Gemini ile dilekçe tespiti ve konumsal OCR için hazır."
+        contract = ActivityResultContracts.TakePicture()
+    ) { isSuccess ->
+        viewModel.clearCurrentPreview()
+        val capturedUri = pendingCameraUri
+        selectedImageBytes = null
+        selectedImageUri = if (isSuccess) capturedUri else null
+        statusText = if (isSuccess && capturedUri != null) {
+            "Fotoğraf çekildi (yüksek çözünürlük). Gemini ile dilekçe tespiti ve konumsal OCR için hazır."
         } else {
             "Fotoğraf çekimi iptal edildi."
         }
+        pendingCameraUri = null
         warningText = null
     }
 
@@ -98,8 +106,8 @@ fun ScanToPreviewScreen(
             fontWeight = FontWeight.Bold
         )
         Text(
-            "Bu akışta fotoğraf Gemini API'ye gönderilir. Önce kağıt ve dilekçe formatı tespiti yapılır, " +
-                    "sonra el yazısı + normal yazı satırları konumlarıyla çıkarılıp A4 önizlemeye aynı düzende yerleştirilir.",
+            "Bu akışta AI size elinizde bulunan dilekçe için hızlı bir yazdırma yapmaya çalışır. Hata yapabilir, beğenmediğiniz yerleştirmeleri elle düzenlemeniz gerekir. " +
+                    "Uzun dilekçelerde hata gösterilir. Bu işlem biraz uzun sürebilir.",
             style = MaterialTheme.typography.bodyLarge
         )
 
@@ -107,10 +115,25 @@ fun ScanToPreviewScreen(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally)
         ) {
-            OutlinedButton(onClick = { pickImageLauncher.launch("image/*") }) {
+            OutlinedButton(
+                onClick = {
+                    pickImageLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                }
+            ) {
                 Text("Fotoğraf Seç", style = MaterialTheme.typography.titleMedium)
             }
-            OutlinedButton(onClick = { takePhotoLauncher.launch(null) }) {
+            OutlinedButton(onClick = {
+                val uri = createTempImageUri(context)
+                if (uri == null) {
+                    warningText = "Kamera için geçici dosya hazırlanamadı. Lütfen tekrar deneyin."
+                    statusText = "Fotoğraf çekimi başlatılamadı."
+                    return@OutlinedButton
+                }
+                pendingCameraUri = uri
+                takePhotoLauncher.launch(uri)
+            }) {
                 Text("Fotoğraf Çek", style = MaterialTheme.typography.titleMedium)
             }
         }
@@ -129,7 +152,7 @@ fun ScanToPreviewScreen(
                 scope.launch {
                     isProcessing = true
                     warningText = null
-                    statusText = "Fotoğraf okunuyor..."
+                    statusText = "Okuma yapılıyor..."
 
 
                     val result = runCatching {
@@ -143,11 +166,19 @@ fun ScanToPreviewScreen(
 
                         val preparedImage = prepareImageForOcr(bytes)
 
-                        viewModel.createPreviewFromGeminiDocumentLayout(
-                            imageBytes = preparedImage.bytes,
-                            mimeType = preparedImage.mimeType
-                        )
-
+                        var latestResult: GeminiOcrPreviewResult = GeminiOcrPreviewResult.Error("Bilinmeyen hata")
+                        for (attempt in 1..3) {
+                            latestResult = viewModel.createPreviewFromGeminiDocumentLayout(
+                                imageBytes = preparedImage.bytes,
+                                mimeType = preparedImage.mimeType
+                            )
+                            if (latestResult is GeminiOcrPreviewResult.Success) break
+                            if (attempt < 3) {
+                                //statusText = "${attempt}. okuma yapıldı, başarısız. \n${attempt + 1}. okuma yapılıyor..."
+                                statusText = "Bu işlem biraz uzun sürebilir."
+                            }
+                        }
+                        latestResult
                     }.getOrElse { error ->
                         GeminiOcrPreviewResult.Error(error.localizedMessage ?: "Bilinmeyen hata")
                     }
@@ -158,7 +189,7 @@ fun ScanToPreviewScreen(
                             navController.navigate("preview_screen/new")
                         }
                         is GeminiOcrPreviewResult.Error -> {
-                            statusText = "İşlem başarısız."
+                            statusText = "Okuma başarısız oldu."
                             warningText = result.message
                         }
 
@@ -274,4 +305,19 @@ private fun Bitmap.toJpegBytes(
     return output.toByteArray().also {
         output.close()
     }
+}
+
+private fun createTempImageUri(context: android.content.Context): Uri? {
+    return runCatching {
+        val tempFile = File.createTempFile(
+            "ocr_capture_",
+            ".jpg",
+            context.cacheDir
+        )
+        FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            tempFile
+        )
+    }.getOrNull()
 }
