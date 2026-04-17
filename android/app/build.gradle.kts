@@ -89,4 +89,6 @@ dependencies {
 
     // İkon kütüphanesi (Share, Person, Home gibi ikonlar için gereklidir)
     implementation("androidx.compose.material:material-icons-extended:1.6.0")
+
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }

@@ -707,8 +707,27 @@ fun PreviewScreen(
             """
             (function() {
                 const page = document.querySelector('.a4-page') || document.body;
-                page.style.fontSize = '${"%.2f".format(java.util.Locale.US, clampedFont)}pt';
-                page.style.lineHeight = '${"%.2f".format(java.util.Locale.US, clampedLine)}';
+                const ocrFlow = page.querySelector('.ocr-flow');
+    
+                const fontValue = '${"%.2f".format(java.util.Locale.US, clampedFont)}pt';
+                const lineValue = '${"%.2f".format(java.util.Locale.US, clampedLine)}';
+    
+                page.style.fontSize = fontValue;
+                page.style.lineHeight = lineValue;
+    
+                if (ocrFlow) {
+                    ocrFlow.style.fontSize = fontValue;
+                    ocrFlow.style.lineHeight = lineValue;
+                    ocrFlow.style.fontFamily = 'inherit';
+    
+                    const lines = ocrFlow.querySelectorAll('.ocr-line');
+                    lines.forEach(function(line) {
+                        line.style.fontSize = 'inherit';
+                        line.style.lineHeight = 'inherit';
+                        line.style.fontFamily = 'inherit';
+                    });
+                }
+    
                 if (window.AndroidEditBridge && window.AndroidEditBridge.onContentChanged) {
                     window.AndroidEditBridge.onContentChanged();
                 }

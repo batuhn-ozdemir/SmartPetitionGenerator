@@ -1012,13 +1012,18 @@ private fun buildFlowingOcrHtml(
             .ocr-flow {
                 width: 160mm;
                 margin: 0 auto;
-                font-family: "Times New Roman", serif;
-                font-size: 12pt;
-                line-height: 1.35;
+                font-family: inherit;
+                font-size: inherit;
+                line-height: inherit;
+                text-align: inherit;
             }
             .ocr-flow .ocr-line {
                 width: 100%;
                 margin: 0;
+                font-family: inherit;
+                font-size: inherit;
+                line-height: inherit;
+                text-align: inherit;
                 word-break: break-word;
                 overflow-wrap: anywhere;
             }

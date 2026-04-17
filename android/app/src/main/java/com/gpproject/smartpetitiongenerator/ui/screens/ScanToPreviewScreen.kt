@@ -40,6 +40,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import android.content.Context
+import android.graphics.Matrix
+import androidx.exifinterface.media.ExifInterface
+import java.io.ByteArrayInputStream
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.GeminiOcrPreviewResult
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.PetitionViewModel
 import kotlinx.coroutines.launch
@@ -154,31 +158,17 @@ fun ScanToPreviewScreen(
                     warningText = null
                     statusText = "Okuma yapılıyor..."
 
-
                     val result = runCatching {
-                        val bytes = when {
-                            inMemoryBytes != null -> inMemoryBytes
-                            imageUri != null -> context.contentResolver.openInputStream(imageUri).use { input ->
-                                input?.readBytes()
-                            } ?: error("Görsel açılamadı")
-                            else -> error("Görsel bulunamadı")
-                        }
+                        val preparedImage = prepareImageForOcr(
+                            context = context,
+                            imageUri = imageUri,
+                            originalBytes = inMemoryBytes
+                        )
 
-                        val preparedImage = prepareImageForOcr(bytes)
-
-                        var latestResult: GeminiOcrPreviewResult = GeminiOcrPreviewResult.Error("Bilinmeyen hata")
-                        for (attempt in 1..3) {
-                            latestResult = viewModel.createPreviewFromGeminiDocumentLayout(
-                                imageBytes = preparedImage.bytes,
-                                mimeType = preparedImage.mimeType
-                            )
-                            if (latestResult is GeminiOcrPreviewResult.Success) break
-                            if (attempt < 3) {
-                                //statusText = "${attempt}. okuma yapıldı, başarısız. \n${attempt + 1}. okuma yapılıyor..."
-                                statusText = "Bu işlem biraz uzun sürebilir."
-                            }
-                        }
-                        latestResult
+                        viewModel.createPreviewFromGeminiDocumentLayout(
+                            imageBytes = preparedImage.bytes,
+                            mimeType = preparedImage.mimeType
+                        )
                     }.getOrElse { error ->
                         GeminiOcrPreviewResult.Error(error.localizedMessage ?: "Bilinmeyen hata")
                     }
@@ -192,8 +182,8 @@ fun ScanToPreviewScreen(
                             statusText = "Okuma başarısız oldu."
                             warningText = result.message
                         }
-
                     }
+
                     isProcessing = false
                 }
             }
@@ -251,50 +241,131 @@ private data class PreparedImage(
 )
 
 private fun prepareImageForOcr(
-    originalBytes: ByteArray,
-    maxDimensionPx: Int = 2048,
-    maxPayloadBytes: Int = 2_400_000
+    context: Context,
+    imageUri: Uri?,
+    originalBytes: ByteArray?,
+    maxLongEdgePx: Int = 2560,
+    preferredQuality: Int = 95,
+    softPayloadLimitBytes: Int = 7_500_000
 ): PreparedImage {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(originalBytes, 0, originalBytes.size, bounds)
-
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-        return PreparedImage(originalBytes, "image/jpeg")
+    val sourceBytes = when {
+        originalBytes != null -> originalBytes
+        imageUri != null -> context.contentResolver.openInputStream(imageUri)?.use { it.readBytes() }
+            ?: error("Görsel açılamadı")
+        else -> error("Görsel bulunamadı")
     }
 
+    val normalizedBitmap = decodeBitmapRespectingOrientation(
+        context = context,
+        imageUri = imageUri,
+        sourceBytes = sourceBytes,
+        maxLongEdgePx = maxLongEdgePx
+    ) ?: return PreparedImage(sourceBytes, "image/jpeg")
+
+    val output = ByteArrayOutputStream()
+    var quality = preferredQuality
+    normalizedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
+
+    while (output.size() > softPayloadLimitBytes && quality > 82) {
+        output.reset()
+        quality -= 4
+        normalizedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
+    }
+
+    normalizedBitmap.recycle()
+
+    val jpegBytes = output.toByteArray()
+    output.close()
+
+    return PreparedImage(
+        bytes = jpegBytes,
+        mimeType = "image/jpeg"
+    )
+}
+
+private fun decodeBitmapRespectingOrientation(
+    context: Context,
+    imageUri: Uri?,
+    sourceBytes: ByteArray,
+    maxLongEdgePx: Int
+): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(sourceBytes, 0, sourceBytes.size, bounds)
+
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
     val largest = maxOf(bounds.outWidth, bounds.outHeight)
-    val sampleSize = if (largest <= maxDimensionPx) 1 else {
+    val sampleSize = if (largest <= maxLongEdgePx) {
+        1
+    } else {
         var sample = 1
-        while (largest / sample > maxDimensionPx) sample *= 2
+        while (largest / sample > maxLongEdgePx) sample *= 2
         sample
     }
 
-    val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-    val bitmap = BitmapFactory.decodeByteArray(originalBytes, 0, originalBytes.size, options)
-        ?: return PreparedImage(originalBytes, "image/jpeg")
+    val bitmap = BitmapFactory.decodeByteArray(
+        sourceBytes,
+        0,
+        sourceBytes.size,
+        BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+        }
+    ) ?: return null
 
-    val output = ByteArrayOutputStream()
-    var quality = 88
-    bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
+    val orientation = resolveExifOrientation(context, imageUri, sourceBytes)
+    return bitmap.rotateByExifOrientation(orientation)
+}
 
-    while (output.size() > maxPayloadBytes && quality > 55) {
-        output.reset()
-        quality -= 8
-        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
+private fun resolveExifOrientation(
+    context: Context,
+    imageUri: Uri?,
+    sourceBytes: ByteArray
+): Int {
+    return runCatching {
+        when {
+            imageUri != null -> {
+                context.contentResolver.openInputStream(imageUri)?.use { input ->
+                    ExifInterface(input).getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL
+                    )
+                } ?: ExifInterface.ORIENTATION_NORMAL
+            }
+            else -> {
+                ByteArrayInputStream(sourceBytes).use { input ->
+                    ExifInterface(input).getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL
+                    )
+                }
+            }
+        }
+    }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+}
+
+private fun Bitmap.rotateByExifOrientation(orientation: Int): Bitmap {
+    val matrix = Matrix()
+
+    when (orientation) {
+        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE -> {
+            matrix.preScale(-1f, 1f)
+            matrix.postRotate(270f)
+        }
+        ExifInterface.ORIENTATION_TRANSVERSE -> {
+            matrix.preScale(-1f, 1f)
+            matrix.postRotate(90f)
+        }
+        else -> return this
     }
 
-    bitmap.recycle()
-    val compressed = output.toByteArray()
-    output.close()
-
-    if (compressed.size > maxPayloadBytes) {
-        Log.w("ScanToPreviewScreen", "OCR payload still large after compression: ${compressed.size} bytes")
+    return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true).also {
+        if (it != this) recycle()
     }
-
-    return PreparedImage(
-        bytes = compressed,
-        mimeType = "image/jpeg"
-    )
 }
 
 private fun Bitmap.toJpegBytes(
