@@ -23,6 +23,7 @@ import kotlinx.coroutines.launch
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.io.IOException
+import java.util.Locale
 import kotlin.math.min
 
 class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
@@ -535,14 +536,13 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         _currentPreviewOrigin.value = PreviewOrigin.MANUAL
     }
 
-    fun createPreviewFromOcrTextLayout(
+    private fun createPreviewFromOcrTextLayout(
         imageWidthPx: Int,
         imageHeightPx: Int,
         lines: List<OcrPositionedText>
-    ) {
+    ): GeminiOcrPreviewResult {
         if (imageWidthPx <= 0 || imageHeightPx <= 0 || lines.isEmpty()) {
-            _aiState.value = AiState.Error("Fotoğraftan okunabilir metin bulunamadı.")
-            return
+            return GeminiOcrPreviewResult.Error("Fotoğraftan okunabilir metin bulunamadı.")
         }
 
         val renderableLines = buildRenderableLines(
@@ -551,12 +551,17 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             lines = lines
         )
 
-        val rawHtml = buildFlowingOcrHtml(imageWidthPx, imageHeightPx, renderableLines)
+        val rawHtml = when (val htmlResult = buildFlowingOcrHtml(imageWidthPx, imageHeightPx, renderableLines)) {
+            is OcrHtmlBuildResult.Success -> htmlResult.html
+            is OcrHtmlBuildResult.Error -> {
+                return GeminiOcrPreviewResult.Error(htmlResult.message)
+            }
+        }
 
         _currentPreviewHtml.value = TemplateEngine.wrapContentInA4(rawHtml)
         _canSaveCurrentPreviewAsTemplate.value = false
         _currentPreviewOrigin.value = PreviewOrigin.OCR
-        _aiState.value = AiState.Success
+        return GeminiOcrPreviewResult.Success(1.0)
     }
 
     suspend fun createPreviewFromGeminiDocumentLayout(
@@ -612,9 +617,12 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             return GeminiOcrPreviewResult.Error("Belge dilekçe olarak tespit edilemedi.")
         }
 
-        if (response.confidence < 0.68) {
+        if (response.confidence < 0.60) {
             return GeminiOcrPreviewResult.Error("Fotoğraf kalitesi düşük bulundu (güven: ${"%.2f".format(java.util.Locale.US, response.confidence)}).")
         }
+
+        val width = response.imageWidth
+        val height = response.imageHeight
 
         val lines = response.lines
             .filter { it.text.isNotBlank() }
@@ -624,7 +632,8 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                     leftPx = it.leftPx,
                     topPx = it.topPx,
                     widthPx = it.widthPx,
-                    heightPx = it.heightPx
+                    heightPx = it.heightPx,
+                    writingType = it.writingType
                 )
             }
 
@@ -632,12 +641,16 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             return GeminiOcrPreviewResult.Error("Metin satırları çıkarılamadı. Lütfen daha net bir fotoğraf deneyin.")
         }
 
-        createPreviewFromOcrTextLayout(
-            imageWidthPx = response.imageWidth,
-            imageHeightPx = response.imageHeight,
+        when (val previewResult = createPreviewFromOcrTextLayout(
+            imageWidthPx = width,
+            imageHeightPx = height,
             lines = lines
-        )
-        return GeminiOcrPreviewResult.Success(response.confidence)
+        )) {
+            is GeminiOcrPreviewResult.Error -> return previewResult
+            is GeminiOcrPreviewResult.Success -> {
+                return GeminiOcrPreviewResult.Success(response.confidence)
+            }
+        }
     }
 
     fun createPreviewFromReadyTemplate(template: ReadyPetitionTemplate, extractedInputs: Map<String, String>) {
@@ -832,7 +845,8 @@ private data class OcrRenderableLine(
     val topPx: Int,
     val widthPx: Int,
     val heightPx: Int,
-    val fontPx: Int
+    val fontPx: Int,
+    val writingType: String?
 )
 
 private fun buildRenderableLines(
@@ -868,7 +882,8 @@ private fun buildRenderableLines(
             topPx = topPx,
             widthPx = min(widthPx, (imageWidthPx - leftPx).coerceAtLeast(1)),
             heightPx = line.heightPx.coerceAtLeast(1),
-            fontPx = fontPx
+            fontPx = fontPx,
+            writingType = line.writingType
         )
     }
 }
@@ -894,92 +909,143 @@ private fun isLikelyOfficialHeaderLine(text: String): Boolean {
     return hasHeaderKeyword || uppercaseRatio >= 0.90f
 }
 
+private fun shouldRenderAsBold(
+    line: OcrRenderableLine,
+    rowText: String,
+    imageWidthPx: Int,
+    isHeaderRegion: Boolean,
+    medianFontPx: Float
+): Boolean {
+    if (isHandwrittenWritingType(line.writingType)) return false
+
+    val letterCount = rowText.count { it.isLetter() }
+    val uppercaseRatio = rowText.count { it.isLetter() && it.isUpperCase() }
+        .toFloat() / letterCount.coerceAtLeast(1)
+    val centerX = line.leftPx + (line.widthPx / 2f)
+    val centered = centerX in (imageWidthPx * 0.33f)..(imageWidthPx * 0.67f)
+    val hasSectionMarker = rowText.contains(":") || rowText.uppercase().startsWith("KONU")
+    val visiblyLargerThanBody = line.fontPx >= (medianFontPx * 1.14f)
+    val compactHeadingLine = rowText.length <= 80
+
+    if (isHeaderRegion && centered && isLikelyOfficialHeaderLine(rowText)) return true
+
+    return compactHeadingLine &&
+            hasSectionMarker &&
+            uppercaseRatio >= 0.35f &&
+            visiblyLargerThanBody
+}
+
+private fun isHandwrittenWritingType(writingType: String?): Boolean {
+    val normalized = writingType?.trim()?.lowercase().orEmpty()
+    if (normalized.isBlank()) return false
+    return normalized.contains("hand")
+            || normalized.contains("el_yaz")
+            || normalized.contains("el yaz")
+            || normalized == "cursive"
+}
+
+
+private sealed class OcrHtmlBuildResult {
+    data class Success(val html: String) : OcrHtmlBuildResult()
+    data class Error(val message: String) : OcrHtmlBuildResult()
+}
+
 private fun buildFlowingOcrHtml(
     imageWidthPx: Int,
     imageHeightPx: Int,
     lines: List<OcrRenderableLine>
-): String {
-    if (lines.isEmpty()) return "<p><br/></p>"
+): OcrHtmlBuildResult {
+    if (lines.isEmpty()) return OcrHtmlBuildResult.Success("<p><br/></p>")
 
     val sorted = lines.sortedWith(compareBy<OcrRenderableLine> { it.topPx }.thenBy { it.leftPx })
-    val medianHeight = sorted.map { it.heightPx.coerceAtLeast(1) }.sorted().let { it[it.size / 2] }.toFloat()
-    val leftmost = sorted.minOf { it.leftPx }.toFloat()
-    val rightmost = sorted.maxOf { (it.leftPx + it.widthPx).coerceAtMost(imageWidthPx) }.toFloat()
-    val detectedWidth = (rightmost - leftmost).coerceAtLeast(imageWidthPx * 0.72f)
-    val scaleX = 160f / detectedWidth
-    val scaleY = 247f / imageHeightPx.coerceAtLeast(1).toFloat()
-    val baselineLineHeightMm = (medianHeight * scaleY * 1.28f).coerceIn(4.2f, 7.2f)
+    val topAnchor = sorted.minOf { it.topPx }
+    val leftAnchor = sorted.minOf { it.leftPx }
+    val medianHeightPx = sorted.map { it.heightPx.coerceAtLeast(1) }.sorted().let { it[it.size / 2] }.toFloat()
+    val lineStepPx = medianHeightPx.coerceAtLeast(12f)
+    val charWidthPx = sorted
+        .mapNotNull { line ->
+            val visibleLength = line.text.replace(Regex("\\s+"), " ").trim().length
+            if (visibleLength <= 0) null else (line.widthPx.toFloat() / visibleLength)
+        }
+        .sorted()
+        .let { widths ->
+            if (widths.isEmpty()) 7.2f else widths[widths.size / 2].coerceIn(4.8f, 16f)
+        }
+
+    val totalRows = ((imageHeightPx / lineStepPx) + 10).toInt().coerceAtLeast(sorted.size + 2)
+    val rowMap = linkedMapOf<Int, StringBuilder>()
+
+    sorted.forEach { line ->
+        val rowText = line.text
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .split('\n')
+            .joinToString("\n") { it.replace(Regex("[ \\t]+"), " ").trimEnd() }
+            .trim()
+        if (rowText.isBlank()) return@forEach
+
+        val rowIndex = (((line.topPx - topAnchor).coerceAtLeast(0)) / lineStepPx)
+            .toInt()
+            .coerceIn(0, totalRows)
+        val columnIndex = (((line.leftPx - leftAnchor).coerceAtLeast(0)) / charWidthPx)
+            .toInt()
+            .coerceAtLeast(0)
+
+        val target = rowMap.getOrPut(rowIndex) { StringBuilder() }
+        while (target.length < columnIndex) target.append(' ')
+
+        if (target.isNotEmpty() && !target.last().isWhitespace()) target.append(' ')
+        target.append(rowText)
+    }
+
+    val orderedRows = buildList {
+        val maxRow = rowMap.keys.maxOrNull() ?: 0
+        for (row in 0..maxRow) {
+            add(rowMap[row]?.toString()?.trimEnd().orEmpty())
+        }
+    }
 
     val sb = StringBuilder()
     sb.append(
         """
         <style>
             .ocr-flow {
-                position: relative;
                 width: 160mm;
-                height: 247mm;
                 margin: 0 auto;
-                font-family: "Times New Roman", Times, serif;
+                font-family: "Times New Roman", serif;
                 font-size: 12pt;
-                line-height: 1.4;
+                line-height: 1.35;
             }
             .ocr-flow .ocr-line {
-                position: absolute;
+                width: 100%;
                 margin: 0;
-                padding: 0;
-                white-space: pre-wrap;
+                word-break: break-word;
                 overflow-wrap: anywhere;
-                text-indent: 0;
             }
-            .ocr-flow .ocr-header {
-                font-weight: 700;
-                letter-spacing: 0.02em;
-            }
-            .ocr-flow .ocr-center { text-align: center; }
-            .ocr-flow .ocr-left { text-align: left; }
-            .ocr-flow .ocr-right { text-align: right; }
-            .ocr-flow .ocr-justify { text-align: justify; }
         </style>
         <div class="ocr-flow">
         """.trimIndent()
     )
 
-    val topAnchor = sorted.first().topPx
-    val bottomRegionStart = imageHeightPx * 0.76f
-
-    sorted.forEach { line ->
-        val rowText = line.text.replace(Regex("\\s+"), " ").trim()
-        if (rowText.isBlank()) return@forEach
-
-        val textLeftMm = ((line.leftPx - leftmost).coerceAtLeast(0f) * scaleX).coerceIn(0f, 160f)
-        val textTopMm = ((line.topPx - topAnchor).coerceAtLeast(0) * scaleY).coerceIn(0f, 245f)
-        val textWidthMm = (line.widthPx * scaleX).coerceIn(14f, (160f - textLeftMm).coerceAtLeast(14f))
-        val fontSizePt = (line.fontPx * scaleY * 2.85f).coerceIn(10f, 14f)
-        val lineHeightMm = (line.heightPx * scaleY * 1.24f).coerceIn(4f, baselineLineHeightMm + 1.8f)
-
-        val centerX = line.leftPx + (line.widthPx / 2f)
-        val centered = centerX in (imageWidthPx * 0.33f)..(imageWidthPx * 0.67f)
-        val nearRight = (line.leftPx + line.widthPx) >= imageWidthPx * 0.78f
-        val isHeaderRegion = line.topPx <= topAnchor + (medianHeight * 8f)
-        val isFooterRegion = line.topPx >= bottomRegionStart
-        val alignClass = when {
-            centered && isHeaderRegion && isLikelyOfficialHeaderLine(rowText) -> "ocr-center ocr-header"
-            nearRight && isFooterRegion -> "ocr-right"
-            line.widthPx >= (imageWidthPx * 0.58f) -> "ocr-justify"
-            else -> "ocr-left"
-        }
-        sb.append("\n<p class=\"ocr-line $alignClass\" style=\"left:${"%.2f".format(java.util.Locale.US, textLeftMm)}mm; top:${"%.2f".format(java.util.Locale.US, textTopMm)}mm; width:${"%.2f".format(java.util.Locale.US, textWidthMm)}mm; min-height:${"%.2f".format(java.util.Locale.US, lineHeightMm)}mm; line-height:${"%.2f".format(java.util.Locale.US, lineHeightMm)}mm; font-size:${"%.2f".format(java.util.Locale.US, fontSizePt)}pt;\">")
-        sb.append(
-            rowText
+    orderedRows.forEach { row ->
+        if (row.isBlank()) {
+            sb.append("<p class=\"ocr-line\"><br/></p>")
+        } else {
+            val leadingSpaces = row.takeWhile { it == ' ' }.length
+            val indentEm = (leadingSpaces / 4.0).coerceAtMost(12.0)
+            val content = row.trimStart()
+            val escaped = content
                 .replace("&", "&amp;")
                 .replace("<", "&lt;")
                 .replace(">", "&gt;")
-        )
-        sb.append("</p>")
+            sb.append("<p class=\"ocr-line\" style=\"text-indent:${"%.2f".format(Locale.US, indentEm)}em;\">")
+            sb.append(if (escaped.isBlank()) "<br/>" else escaped)
+            sb.append("</p>")
+        }
     }
 
-    sb.append("\n</div>")
-    return sb.toString()
+    sb.append("</div>")
+    return OcrHtmlBuildResult.Success(sb.toString())
 }
 
 data class OcrPositionedText(
@@ -987,7 +1053,8 @@ data class OcrPositionedText(
     val leftPx: Int,
     val topPx: Int,
     val widthPx: Int,
-    val heightPx: Int
+    val heightPx: Int,
+    val writingType: String?
 )
 
 sealed class AiState {
