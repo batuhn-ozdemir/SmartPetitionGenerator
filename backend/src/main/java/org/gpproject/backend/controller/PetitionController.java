@@ -5,10 +5,8 @@ import org.gpproject.backend.model.AiResponse;
 import org.gpproject.backend.model.OcrLayoutRequest;
 import org.gpproject.backend.model.OcrLayoutResponse;
 import org.gpproject.backend.model.UserPrompt;
-import org.gpproject.backend.service.DocumentOcrService;
-import org.gpproject.backend.service.GeminiService;
-import org.gpproject.backend.service.QueueService;
-import org.gpproject.backend.service.TicketState;
+import org.gpproject.backend.model.OcrQueueResponse;
+import org.gpproject.backend.service.*;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -18,6 +16,7 @@ import org.springframework.web.bind.annotation.*;
 public class PetitionController {
 
     private final QueueService queueService;
+    private final OcrQueueService ocrQueueService;
     private final GeminiService geminiService;
     private final DocumentOcrService documentOcrService;
 
@@ -65,5 +64,38 @@ public class PetitionController {
                 request != null ? request.getMimeType() : null
         );
         return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/ocr-layout/queue")
+    public ResponseEntity<OcrQueueResponse> enqueueOcr(
+            @RequestHeader(value = "X-Client-Id", required = false) String clientId,
+            @RequestBody OcrLayoutRequest request
+    ) {
+        String cid = normalizeClientId(clientId);
+
+        if (request == null || request.getImageBase64() == null || request.getImageBase64().isBlank()) {
+            return ResponseEntity.ok(new OcrQueueResponse("FAILED", null, null, "Fotoğraf gönderilemedi."));
+        }
+
+        String ticketId = ocrQueueService.addToQueue(cid, request.getImageBase64(), request.getMimeType());
+        return ResponseEntity.ok(new OcrQueueResponse("QUEUED", ticketId, null, null));
+    }
+
+    @GetMapping("/ocr-layout/status/{ticketId}")
+    public ResponseEntity<OcrQueueResponse> checkOcrStatus(
+            @RequestHeader(value = "X-Client-Id", required = false) String clientId,
+            @PathVariable String ticketId
+    ) {
+        String cid = normalizeClientId(clientId);
+
+        OcrTicketState ticket = ocrQueueService.getTicket(cid, ticketId);
+        if (ticket == null) return ResponseEntity.notFound().build();
+
+        return ResponseEntity.ok(new OcrQueueResponse(
+                ticket.getStatus().name(),
+                ticketId,
+                ticket.getPayload(),
+                ticket.getErrorMessage()
+        ));
     }
 }

@@ -10,5 +10,5 @@ import lombok.NoArgsConstructor;
 public class AiResponse {
     private String status;      // PROCESSING, COMPLETED, FAILED
     private String ticketId;
-    private String payload;     // HTML İçerik
+    private String payload;
 }

@@ -24,4 +24,16 @@ interface AiApiService {
     suspend fun analyzeOcrLayout(
         @Body request: OcrLayoutRequest
     ): OcrLayoutResponse
+
+    @POST("/api/v1/petition/ocr-layout/queue")
+    suspend fun enqueueOcrLayout(
+        @Header("X-Client-Id") clientId: String,
+        @Body request: OcrLayoutRequest
+    ): OcrQueueResponse
+
+    @GET("/api/v1/petition/ocr-layout/status/{ticketId}")
+    suspend fun checkOcrStatus(
+        @Header("X-Client-Id") clientId: String,
+        @Path("ticketId") ticketId: String
+    ): OcrQueueResponse
 }

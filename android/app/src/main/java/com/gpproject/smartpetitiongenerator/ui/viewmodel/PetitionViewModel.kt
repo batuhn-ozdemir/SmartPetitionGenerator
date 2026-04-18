@@ -11,6 +11,7 @@ import com.gpproject.smartpetitiongenerator.data.remote.AiGeneratedPetition
 import com.gpproject.smartpetitiongenerator.data.remote.AiResponse
 import com.gpproject.smartpetitiongenerator.data.remote.InputField
 import com.gpproject.smartpetitiongenerator.data.remote.InputFieldDeserializer
+import com.gpproject.smartpetitiongenerator.data.remote.OcrQueueResponse
 import com.gpproject.smartpetitiongenerator.data.repository.MainRepository
 import com.gpproject.smartpetitiongenerator.domain.TemplateEngine
 import com.gpproject.smartpetitiongenerator.domain.ReadyPetitionTemplate
@@ -573,24 +574,45 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
 
         val encoded = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
-        val response = runCatching {
-            repository.analyzeDocumentLayout(
+
+        val initial = runCatching {
+            repository.enqueueOcrAnalysis(
                 imageBase64 = encoded,
                 mimeType = mimeType
             )
         }.getOrElse {
             val message = when (it) {
                 is SocketTimeoutException ->
-                    "Belge analizi zaman aşımına uğradı. Lütfen birkaç saniye bekleyip tekrar deneyin."
+                    "Belge analizi isteği zaman aşımına uğradı. Lütfen tekrar deneyin."
                 is UnknownHostException ->
                     "Sunucuya erişilemedi. İnternet bağlantınızı ve backend adresinizi kontrol edin."
                 is IOException ->
                     "Sunucu bağlantısında geçici bir sorun oluştu. Lütfen tekrar deneyin."
                 else ->
-                    "Belge analizi şu an tamamlanamadı. Lütfen tekrar deneyin."
+                    "Belge analizi şu an başlatılamadı. Lütfen tekrar deneyin."
             }
             return GeminiOcrPreviewResult.Error(message)
         }
+
+        if (initial.status == "FAILED") {
+            return GeminiOcrPreviewResult.Error(initial.message ?: "OCR kuyruğuna eklenemedi.")
+        }
+
+        val ticketId = initial.ticketId
+            ?: return GeminiOcrPreviewResult.Error("OCR bileti alınamadı.")
+
+        val done = runCatching {
+            pollUntilOcrCompleted(ticketId)
+        }.getOrElse {
+            return GeminiOcrPreviewResult.Error("OCR sonucu alınamadı. Lütfen tekrar deneyin.")
+        }
+
+        if (done.status == "FAILED") {
+            return GeminiOcrPreviewResult.Error(done.message ?: "OCR işlemi başarısız oldu.")
+        }
+
+        val response = done.payload
+            ?: return GeminiOcrPreviewResult.Error("OCR sonucu boş geldi.")
 
         if (!response.success) {
             val message = when (response.errorCode?.uppercase()) {
@@ -601,16 +623,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                 "PAYLOAD_TOO_LARGE" -> "Fotoğraf boyutu çok büyük. Daha düşük çözünürlüklü bir görsel yükleyin."
                 else -> response.errorMessage ?: "Belge analizi tamamlanamadı."
             }
-            val normalizedMessage = when {
-                message.contains("exceeded", ignoreCase = true) ||
-                        message.contains("resource exhausted", ignoreCase = true) ||
-                        message.contains("quota", ignoreCase = true) ||
-                        message.contains("429") -> "OCR limiti doldu. Lütfen 30-60 saniye sonra tekrar deneyin."
-                message.contains("payload", ignoreCase = true) ||
-                        message.contains("too large", ignoreCase = true) -> "Fotoğraf boyutu çok büyük. Daha düşük çözünürlüklü bir görsel yükleyin."
-                else -> message
-            }
-            return GeminiOcrPreviewResult.Error(normalizedMessage)
+            return GeminiOcrPreviewResult.Error(message)
         }
 
         if (!response.petition) {
@@ -618,7 +631,9 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
 
         if (response.confidence < 0.60) {
-            return GeminiOcrPreviewResult.Error("Fotoğraf kalitesi düşük bulundu (güven: ${"%.2f".format(java.util.Locale.US, response.confidence)}).")
+            return GeminiOcrPreviewResult.Error(
+                "Fotoğraf kalitesi düşük bulundu (güven: ${"%.2f".format(java.util.Locale.US, response.confidence)})."
+            )
         }
 
         val width = response.imageWidth
@@ -641,15 +656,15 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             return GeminiOcrPreviewResult.Error("Metin satırları çıkarılamadı. Lütfen daha net bir fotoğraf deneyin.")
         }
 
-        when (val previewResult = createPreviewFromOcrTextLayout(
-            imageWidthPx = width,
-            imageHeightPx = height,
-            lines = lines
-        )) {
-            is GeminiOcrPreviewResult.Error -> return previewResult
-            is GeminiOcrPreviewResult.Success -> {
-                return GeminiOcrPreviewResult.Success(response.confidence)
-            }
+        return when (
+            val previewResult = createPreviewFromOcrTextLayout(
+                imageWidthPx = width,
+                imageHeightPx = height,
+                lines = lines
+            )
+        ) {
+            is GeminiOcrPreviewResult.Error -> previewResult
+            is GeminiOcrPreviewResult.Success -> GeminiOcrPreviewResult.Success(response.confidence)
         }
     }
 
@@ -837,6 +852,16 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
 
     fun deletePetition(p: PetitionEntity) =
         viewModelScope.launch { repository.deletePetition(p) }
+
+    private suspend fun pollUntilOcrCompleted(ticketId: String): OcrQueueResponse {
+        while (true) {
+            delay(2000)
+            val res = runCatching { repository.checkOcrStatus(ticketId) }.getOrNull() ?: continue
+
+            if (res.status == "COMPLETED") return res
+            if (res.status == "FAILED") return res
+        }
+    }
 }
 
 private data class OcrRenderableLine(

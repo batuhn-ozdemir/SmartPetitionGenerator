@@ -12,6 +12,7 @@ import com.gpproject.smartpetitiongenerator.data.remote.ClientIdProvider
 import com.gpproject.smartpetitiongenerator.data.remote.InputField
 import com.gpproject.smartpetitiongenerator.data.remote.OcrLayoutRequest
 import com.gpproject.smartpetitiongenerator.data.remote.OcrLayoutResponse
+import com.gpproject.smartpetitiongenerator.data.remote.OcrQueueResponse
 import com.gpproject.smartpetitiongenerator.data.remote.UserPrompt
 import com.gpproject.smartpetitiongenerator.domain.ReadyPetitionTemplate
 import com.gpproject.smartpetitiongenerator.domain.ReadyPetitionTemplates
@@ -261,6 +262,23 @@ class MainRepository(
                 imageBase64 = imageBase64,
                 mimeType = mimeType
             )
+        )
+    }
+
+    suspend fun enqueueOcrAnalysis(imageBase64: String, mimeType: String): OcrQueueResponse {
+        return apiService.enqueueOcrLayout(
+            clientId = clientId,
+            request = OcrLayoutRequest(
+                imageBase64 = imageBase64,
+                mimeType = mimeType
+            )
+        )
+    }
+
+    suspend fun checkOcrStatus(ticketId: String): OcrQueueResponse {
+        return apiService.checkOcrStatus(
+            clientId = clientId,
+            ticketId = ticketId
         )
     }
 }

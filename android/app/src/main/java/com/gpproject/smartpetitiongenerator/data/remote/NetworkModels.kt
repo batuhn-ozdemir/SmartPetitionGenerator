@@ -48,3 +48,10 @@ data class OcrLine(
     @SerializedName("heightPx") val heightPx: Int,
     @SerializedName("writingType") val writingType: String?
 )
+
+data class OcrQueueResponse(
+    val status: String,
+    val ticketId: String?,
+    val payload: OcrLayoutResponse?,
+    val message: String?
+)
