@@ -265,7 +265,6 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         return readyTemplates.value.firstOrNull { it.id == id }
     }
 
-    // -------------------- 1) DRAFT (JSON) --------------------
     fun generatePetition(prompt: String) {
         viewModelScope.launch {
             try {
@@ -284,6 +283,9 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                 }
 
                 val done = pollUntilCompleted(ticketId)
+
+//                println("INITIAL -> status=${initial.status}, ticketId=${initial.ticketId}, payload=${initial.payload}")
+//                println("DONE -> status=${done.status}, payload=${done.payload}")
 
                 if (done.status == "FAILED") {
                     val payload = done.payload.orEmpty()
@@ -313,6 +315,8 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                     return@launch
                 }
 
+//                println("PAYLOAD BEFORE PARSE = ${done.payload}")
+
                 val parsed = gson.fromJson(payload, AiGeneratedPetition::class.java)
 
                 val template = parsed.templateHtml?.trim()
@@ -325,7 +329,11 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                     return@launch
                 }
 
-                if (template.contains("HATA", ignoreCase = true)) {
+//                println("PARSED TEMPLATE = ${parsed.templateHtml}")
+//                println("PARSED GIVEN = ${parsed.givenParams}")
+//                println("PARSED REQUIRED = ${parsed.requiredParams}")
+
+                if (isBackendErrorTemplate(template)) {
                     val backendMessage = extractBackendErrorMessage(template).orEmpty()
                     val safeUiMessage = if (backendMessage.contains("güvenlik", ignoreCase = true) ||
                         backendMessage.contains("şüpheli", ignoreCase = true)) {
@@ -350,6 +358,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
 
                 // template + given + required + kişisel -> form alanları
                 val fieldsForForm = buildFormFields(template, given, required)
+//                println("FIELDS FOR FORM = $fieldsForForm")
 
                 val normalized = AiGeneratedPetition(
                     templateHtml = template,
@@ -357,15 +366,22 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                     requiredParams = fieldsForForm
                 )
 
+//                println("SETTING AI STATE = NeedsInput")
                 _aiState.value = AiState.NeedsInput(normalized)
 
+//                println("AFTER PARSE -> parsed = $parsed")
+//                println("AFTER PARSE -> template = ${parsed.templateHtml}")
+//                println("AFTER PARSE -> given = ${parsed.givenParams}")
+//                println("AFTER PARSE -> required = ${parsed.requiredParams}")
+
             } catch (e: Exception) {
+                //e.printStackTrace()
+                //println("GENERATE PETITION EXCEPTION = ${e.message}")
                 _aiState.value = AiState.Error("Hata: ${e.localizedMessage}")
             }
         }
     }
 
-    // -------------------- 2) FINAL (Form + Profil -> AI’a geri gönder) --------------------
     fun submitDynamicForm(petitionData: AiGeneratedPetition, userInputs: Map<String, String>) {
         viewModelScope.launch {
             try {
@@ -386,13 +402,6 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                 val allParams = (prof + given + userInputs).mapValues { it.value.trim() } +
                         ("EKLER_BOLUMU" to buildAttachmentSection(prof + given + userInputs))
                 lastResolvedParams = allParams
-
-                // =========================================================================
-                // DİKKAT: Eskiden burada olan "Eksik alanlar var (missing.isNotEmpty)"
-                // kontrolünü TAMAMEN SİLDİK.
-                // Artık kullanıcı her yeri boş bıraksa bile istek sunucuya (AI'a) gidecek
-                // ve yapay zeka "Smart Defaults" kuralı ile o boşlukları mantıklı şekilde uyduracak.
-                // =========================================================================
 
                 val fullHtml = if (draftMode == DraftMode.READY_TEMPLATE) {
 
@@ -917,58 +926,12 @@ private fun normalizeOcrText(text: String): String {
     return text.trim().lowercase().replace(Regex("\\s+"), " ")
 }
 
-private fun isLikelyOfficialHeaderLine(text: String): Boolean {
-    val normalized = text
-        .trim()
-        .replace(Regex("\\s+"), " ")
-    if (normalized.isBlank()) return false
-
-    val uppercaseRatio = normalized.count { it.isLetter() && it.isUpperCase() }
-        .toFloat() / normalized.count { it.isLetter() }.coerceAtLeast(1)
-
-    val hasHeaderKeyword = listOf(
-        "T.C.", "TC ", "SAYIN", "KONU", "İLGİ", "BAŞKANLIĞINA",
-        "MÜDÜRLÜĞÜNE", "MAKAMINA", "VALİLİĞİNE", "KAYMAKAMLIĞINA"
-    ).any { normalized.uppercase().contains(it) }
-
-    return hasHeaderKeyword || uppercaseRatio >= 0.90f
+private fun isBackendErrorTemplate(html: String): Boolean {
+    return Regex(
+        """<h3[^>]*>\s*HATA\s*</h3>""",
+        setOf(RegexOption.IGNORE_CASE)
+    ).containsMatchIn(html)
 }
-
-private fun shouldRenderAsBold(
-    line: OcrRenderableLine,
-    rowText: String,
-    imageWidthPx: Int,
-    isHeaderRegion: Boolean,
-    medianFontPx: Float
-): Boolean {
-    if (isHandwrittenWritingType(line.writingType)) return false
-
-    val letterCount = rowText.count { it.isLetter() }
-    val uppercaseRatio = rowText.count { it.isLetter() && it.isUpperCase() }
-        .toFloat() / letterCount.coerceAtLeast(1)
-    val centerX = line.leftPx + (line.widthPx / 2f)
-    val centered = centerX in (imageWidthPx * 0.33f)..(imageWidthPx * 0.67f)
-    val hasSectionMarker = rowText.contains(":") || rowText.uppercase().startsWith("KONU")
-    val visiblyLargerThanBody = line.fontPx >= (medianFontPx * 1.14f)
-    val compactHeadingLine = rowText.length <= 80
-
-    if (isHeaderRegion && centered && isLikelyOfficialHeaderLine(rowText)) return true
-
-    return compactHeadingLine &&
-            hasSectionMarker &&
-            uppercaseRatio >= 0.35f &&
-            visiblyLargerThanBody
-}
-
-private fun isHandwrittenWritingType(writingType: String?): Boolean {
-    val normalized = writingType?.trim()?.lowercase().orEmpty()
-    if (normalized.isBlank()) return false
-    return normalized.contains("hand")
-            || normalized.contains("el_yaz")
-            || normalized.contains("el yaz")
-            || normalized == "cursive"
-}
-
 
 private sealed class OcrHtmlBuildResult {
     data class Success(val html: String) : OcrHtmlBuildResult()

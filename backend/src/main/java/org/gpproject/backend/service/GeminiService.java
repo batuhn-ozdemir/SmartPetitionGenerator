@@ -155,10 +155,15 @@ public class GeminiService {
         GeminiRequest requestBody = new GeminiRequest(
                 systemContent,
                 new GeminiRequest.Content[]{userContent},
-                new GeminiRequest.GenerationConfig(isFinal ? 1800 : 900, 0.3)
+                new GeminiRequest.GenerationConfig(isFinal ? 1800 : 1400, 0.2)
         );
 
         String jsonBody = gson.toJson(requestBody);
+
+//        System.out.println("=== GEMINI REQUEST USER TEXT ===");
+//        System.out.println(userText);
+//        System.out.println("=== GEMINI REQUEST JSON BODY ===");
+//        System.out.println(jsonBody);
 
         int retriesPerModel = apiKeys.size() * 2;
         int maxAttempts = retriesPerModel * TEXT_MODEL_FALLBACK_ORDER.size();
@@ -195,6 +200,11 @@ public class GeminiService {
                             ? "Sunucu Hatası: " + code + " (" + modelName + ")"
                             : providerError + " (" + modelName + ")";
 
+//                System.out.println("=== GEMINI HTTP ERROR ===");
+//                System.out.println("HTTP Code: " + code);
+//                System.out.println("Model: " + modelName);
+//                System.out.println("Response Body: " + responseBody);
+
                     if (code == 400 || code == 403 || code == 404) {
                         continue;
                     }
@@ -219,11 +229,17 @@ public class GeminiService {
                     continue;
                 }
 
+//            System.out.println("=== GEMINI RAW RESPONSE ===");
+//            System.out.println(aiRawText);
+
                 String cleanText = aiRawText
                         .replace("```json", "")
                         .replace("```html", "")
                         .replace("```", "")
                         .trim();
+
+//            System.out.println("=== GEMINI CLEAN RESPONSE ===");
+//            System.out.println(cleanText);
 
                 if (cleanText.trim().equals("REJECT_SECURITY")) {
                     return generateErrorJson("Güvenlik Reddi: Lütfen sadece resmi yazışma konuları giriniz.");
@@ -235,12 +251,26 @@ public class GeminiService {
                 cleanText = extractJsonIfAny(cleanText);
 
                 if (!isFinal && cleanText.startsWith("{")) {
-                    cleanText = normalizeDraftJson(cleanText, currentDate, userText);
+                    String normalized = normalizeDraftJson(cleanText, currentDate, userText);
+//                System.out.println("=== NORMALIZED DRAFT JSON ===");
+//                System.out.println(normalized);
+                    return normalized;
                 }
 
-                if (cleanText.startsWith("{") && cleanText.endsWith("}")) return cleanText;
-                if (cleanText.contains("<div") || cleanText.contains("<p>")) return cleanText;
+                if (cleanText.startsWith("{") && cleanText.endsWith("}")) {
+//                System.out.println("=== RETURNING RAW JSON ===");
+//                System.out.println(cleanText);
+                    return cleanText;
+                }
 
+                if (cleanText.contains("<div") || cleanText.contains("<p>")) {
+//                System.out.println("=== RETURNING HTML ===");
+//                System.out.println(cleanText);
+                    return cleanText;
+                }
+
+//            System.out.println("=== INVALID FORMAT AFTER CLEAN ===");
+//            System.out.println(cleanText);
                 lastError = "Yapay zeka geçerli bir format üretemedi.";
 
             } catch (Exception e) {
@@ -248,6 +278,9 @@ public class GeminiService {
                 try { Thread.sleep(backoffMs); } catch (InterruptedException ignored) {}
             }
         }
+
+//        System.out.println("=== GEMINI FINAL FALLBACK ERROR ===");
+//        System.out.println(lastError);
 
         return generateErrorJson(lastError);
     }
@@ -336,6 +369,10 @@ public class GeminiService {
             return gson.toJson(obj);
 
         } catch (Exception e) {
+//            System.out.println("=== NORMALIZE DRAFT JSON ERROR ===");
+//            e.printStackTrace();
+//            System.out.println("=== BROKEN JSON INPUT ===");
+//            System.out.println(json);
             return generateErrorJson("Taslak JSON normalize edilemedi.");
         }
     }
