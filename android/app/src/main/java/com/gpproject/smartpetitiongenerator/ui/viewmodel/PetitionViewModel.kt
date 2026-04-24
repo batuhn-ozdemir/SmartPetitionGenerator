@@ -25,6 +25,7 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.io.IOException
 import java.util.Locale
+import kotlin.math.max
 import kotlin.math.min
 
 class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
@@ -904,7 +905,13 @@ private fun buildRenderableLines(
         if (!duplicated) deduped += candidate
     }
 
-    return deduped.map { line ->
+    val bounded = filterLinesToLikelyPaperArea(
+        imageWidthPx = imageWidthPx,
+        imageHeightPx = imageHeightPx,
+        lines = deduped
+    )
+
+    return bounded.map { line ->
         val widthPx = line.widthPx.coerceIn(1, imageWidthPx)
         val leftPx = line.leftPx.coerceIn(0, imageWidthPx - 1)
         val topPx = line.topPx.coerceIn(0, imageHeightPx - 1)
@@ -920,6 +927,54 @@ private fun buildRenderableLines(
             writingType = line.writingType
         )
     }
+}
+
+private fun filterLinesToLikelyPaperArea(
+    imageWidthPx: Int,
+    imageHeightPx: Int,
+    lines: List<OcrPositionedText>
+): List<OcrPositionedText> {
+    if (lines.size < 6) return lines
+
+    val heights = lines.map { it.heightPx.coerceAtLeast(1) }.sorted()
+    val medianHeight = heights[heights.size / 2]
+    val pad = (medianHeight * 1.8f).toInt().coerceAtLeast(8)
+
+    val lefts = lines.map { it.leftPx }.sorted()
+    val tops = lines.map { it.topPx }.sorted()
+    val rights = lines.map { it.leftPx + it.widthPx.coerceAtLeast(1) }.sorted()
+    val bottoms = lines.map { it.topPx + it.heightPx.coerceAtLeast(1) }.sorted()
+
+    val leftBound = (percentile(lefts, 0.08f) - pad).coerceIn(0, imageWidthPx - 1)
+    val rightBound = (percentile(rights, 0.92f) + pad).coerceIn(1, imageWidthPx)
+    val topBound = (percentile(tops, 0.05f) - pad).coerceIn(0, imageHeightPx - 1)
+    val bottomBound = (percentile(bottoms, 0.90f) + pad).coerceIn(1, imageHeightPx)
+
+    if (rightBound <= leftBound || bottomBound <= topBound) return lines
+
+    val filtered = lines.filter { line ->
+        val lineLeft = line.leftPx
+        val lineRight = line.leftPx + line.widthPx.coerceAtLeast(1)
+        val lineTop = line.topPx
+        val lineBottom = line.topPx + line.heightPx.coerceAtLeast(1)
+
+        val overlap =
+            (min(lineRight, rightBound) - max(lineLeft, leftBound)).coerceAtLeast(0)
+        val overlapRatio = overlap.toFloat() / line.widthPx.coerceAtLeast(1).toFloat()
+
+        overlapRatio >= 0.35f &&
+                lineTop >= topBound &&
+                lineBottom <= bottomBound
+    }
+
+    return if (filtered.size >= 3) filtered else lines
+}
+
+private fun percentile(sortedValues: List<Int>, ratio: Float): Int {
+    if (sortedValues.isEmpty()) return 0
+    val boundedRatio = ratio.coerceIn(0f, 1f)
+    val idx = ((sortedValues.size - 1) * boundedRatio).toInt().coerceIn(0, sortedValues.lastIndex)
+    return sortedValues[idx]
 }
 
 private fun normalizeOcrText(text: String): String {
@@ -987,11 +1042,21 @@ private fun buildFlowingOcrHtml(
     }
 
     val orderedRows = buildList {
-        val maxRow = rowMap.keys.maxOrNull() ?: 0
-        for (row in 0..maxRow) {
+        val sortedRows = rowMap.keys.sorted()
+        var prevRow: Int? = null
+        sortedRows.forEach { row ->
+            val prev = prevRow
+            if (prev != null) {
+                val gap = (row - prev - 1).coerceAtLeast(0)
+                repeat(min(gap, 2)) { add("") }
+            }
             add(rowMap[row]?.toString()?.trimEnd().orEmpty())
+            prevRow = row
         }
     }
+
+    val maxRowsOnA4 = 46
+    val clippedRows = orderedRows.take(maxRowsOnA4)
 
     val sb = StringBuilder()
     sb.append(
@@ -1000,6 +1065,8 @@ private fun buildFlowingOcrHtml(
             .ocr-flow {
                 width: 160mm;
                 margin: 0 auto;
+                max-height: 247mm;
+                overflow: hidden;
                 font-family: inherit;
                 font-size: inherit;
                 line-height: inherit;
@@ -1020,7 +1087,7 @@ private fun buildFlowingOcrHtml(
         """.trimIndent()
     )
 
-    orderedRows.forEach { row ->
+    clippedRows.forEach { row ->
         if (row.isBlank()) {
             sb.append("<p class=\"ocr-line\"><br/></p>")
         } else {
