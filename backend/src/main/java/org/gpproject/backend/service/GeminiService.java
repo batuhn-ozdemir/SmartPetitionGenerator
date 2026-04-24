@@ -35,7 +35,7 @@ public class GeminiService {
             "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent";
 
     private static final List<String> TEXT_MODEL_FALLBACK_ORDER = List.of(
-            "gemini-2.5-flash-lite"
+            "gemini-2.5-flash"
     );
 
     private final OkHttpClient client = new OkHttpClient.Builder()
