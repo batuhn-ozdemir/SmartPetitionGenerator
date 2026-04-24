@@ -20,11 +20,6 @@ interface AiApiService {
         @Path("ticketId") ticketId: String
     ): AiResponse
 
-    @POST("/api/v1/petition/ocr-layout")
-    suspend fun analyzeOcrLayout(
-        @Body request: OcrLayoutRequest
-    ): OcrLayoutResponse
-
     @POST("/api/v1/petition/ocr-layout/queue")
     suspend fun enqueueOcrLayout(
         @Header("X-Client-Id") clientId: String,

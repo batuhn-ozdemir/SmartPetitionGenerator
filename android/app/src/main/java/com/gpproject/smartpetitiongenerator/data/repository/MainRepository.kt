@@ -256,15 +256,6 @@ class MainRepository(
         return apiService.checkStatus(clientId, ticketId)
     }
 
-    suspend fun analyzeDocumentLayout(imageBase64: String, mimeType: String): OcrLayoutResponse {
-        return apiService.analyzeOcrLayout(
-            OcrLayoutRequest(
-                imageBase64 = imageBase64,
-                mimeType = mimeType
-            )
-        )
-    }
-
     suspend fun enqueueOcrAnalysis(imageBase64: String, mimeType: String): OcrQueueResponse {
         return apiService.enqueueOcrLayout(
             clientId = clientId,

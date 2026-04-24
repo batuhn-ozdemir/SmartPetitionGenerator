@@ -20,7 +20,6 @@ public class PetitionController {
     private final GeminiService geminiService;
     private final DocumentOcrService documentOcrService;
 
-    // ✅ Çok kullanıcı: istemci kimliği header’dan gelir (Android bunu göndermeli)
     private String normalizeClientId(String clientId) {
         if (clientId == null || clientId.isBlank()) return "anonymous";
         return clientId.trim();
@@ -53,17 +52,6 @@ public class PetitionController {
         if (ticket == null) return ResponseEntity.notFound().build();
 
         return ResponseEntity.ok(new AiResponse(ticket.getStatus().name(), ticketId, ticket.getPayload()));
-    }
-
-    @PostMapping("/ocr-layout")
-    public ResponseEntity<OcrLayoutResponse> analyzeDocumentWithGemini(
-            @RequestBody OcrLayoutRequest request
-    ) {
-        OcrLayoutResponse response = documentOcrService.analyzeDocumentLayout(
-                request != null ? request.getImageBase64() : null,
-                request != null ? request.getMimeType() : null
-        );
-        return ResponseEntity.ok(response);
     }
 
     @PostMapping("/ocr-layout/queue")
