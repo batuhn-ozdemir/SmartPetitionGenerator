@@ -29,7 +29,9 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         val baseUrl = localProperties.getProperty("BASE_URL") ?: "http://10.0.2.2:8080/"
+        val appSigningSecret = localProperties.getProperty("APP_SIGNING_SECRET") ?: ""
         buildConfigField("String", "BASE_URL", "\"$baseUrl\"")
+        buildConfigField("String", "APP_SIGNING_SECRET", "\"$appSigningSecret\"")
     }
 
     buildTypes {

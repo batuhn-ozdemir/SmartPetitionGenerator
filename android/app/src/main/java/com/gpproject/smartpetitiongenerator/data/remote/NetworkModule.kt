@@ -19,6 +19,7 @@ object NetworkModule {
             .readTimeout(180, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .callTimeout(210, TimeUnit.SECONDS)
+            .addInterceptor(RequestSigningInterceptor(BuildConfig.APP_SIGNING_SECRET))
             .build()
 
         Retrofit.Builder()

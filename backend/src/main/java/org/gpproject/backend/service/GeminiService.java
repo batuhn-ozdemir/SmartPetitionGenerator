@@ -6,7 +6,6 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import okhttp3.*;
-import org.gpproject.backend.model.GeminiRequest;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -24,19 +23,15 @@ public class GeminiService {
 
     private static final Map<String, String> INSTITUTION_ABBREVIATIONS = createInstitutionAbbreviationMap();
 
-    // application.properties dosyasındaki virgülle ayrılmış listeyi alır
     @Value("#{'${gemini.api.keys}'.split(',')}")
     private List<String> apiKeys;
 
-    // Sırayı güvenli bir şekilde takip etmek için
     private final AtomicInteger currentKeyIndex = new AtomicInteger(0);
 
     private static final String GEMINI_URL_TEMPLATE =
             "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent";
 
-    private static final List<String> TEXT_MODEL_FALLBACK_ORDER = List.of(
-            "gemini-2.5-flash"
-    );
+    private static final String TEXT_MODEL = "gemini-2.5-flash";
 
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -46,10 +41,28 @@ public class GeminiService {
 
     private final Gson gson = new Gson();
 
-    // Havuzdan sıradaki API Key'i çeken metod
-    private String getNextApiKey() {
-        int index = currentKeyIndex.getAndUpdate(i -> (i + 1) % apiKeys.size());
-        return apiKeys.get(index).trim();
+    private List<String> normalizedApiKeys() {
+        List<String> keys = new ArrayList<>();
+
+        if (apiKeys == null) return keys;
+
+        for (String key : apiKeys) {
+            if (key == null) continue;
+
+            String cleaned = key.trim();
+
+            if (cleaned.isBlank()) continue;
+            if (cleaned.contains("YOUR_")) continue;
+
+            keys.add(cleaned);
+        }
+
+        return keys;
+    }
+
+    private String getNextApiKey(List<String> keys) {
+        int index = currentKeyIndex.getAndUpdate(i -> (i + 1) % keys.size());
+        return keys.get(index);
     }
 
     public String callGemini(String userText) {
@@ -145,37 +158,22 @@ public class GeminiService {
             Return ONLY STRICT HTML using the structure above. Integrate the user's data fluidly.
             """.formatted(currentDate, currentDate);
 
-        GeminiRequest.Content systemContent = new GeminiRequest.Content(
-                new GeminiRequest.Part[]{new GeminiRequest.Part(systemInstruction)}
-        );
-        GeminiRequest.Content userContent = new GeminiRequest.Content(
-                new GeminiRequest.Part[]{new GeminiRequest.Part(userText)}
-        );
+        String jsonBody = buildGeminiTextRequestBody(systemInstruction, userText, isFinal);
 
-        GeminiRequest requestBody = new GeminiRequest(
-                systemContent,
-                new GeminiRequest.Content[]{userContent},
-                new GeminiRequest.GenerationConfig(isFinal ? 1800 : 1400, 0.2)
-        );
+        List<String> keys = normalizedApiKeys();
 
-        String jsonBody = gson.toJson(requestBody);
+        if (keys.isEmpty()) {
+            return generateErrorJson("Gemini API anahtarı tanımlı değil.");
+        }
 
-//        System.out.println("=== GEMINI REQUEST USER TEXT ===");
-//        System.out.println(userText);
-//        System.out.println("=== GEMINI REQUEST JSON BODY ===");
-//        System.out.println(jsonBody);
-
-        int retriesPerModel = apiKeys.size() * 2;
-        int maxAttempts = retriesPerModel * TEXT_MODEL_FALLBACK_ORDER.size();
-        long backoffMs = 500;
+        int maxAttempts = Math.max(keys.size() * 2, 2);
+        long backoffMs = 750L;
 
         String lastError = "Sunucu Hatası: Tüm denemeler başarısız oldu.";
 
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            String modelName = TEXT_MODEL_FALLBACK_ORDER.get(attempt % TEXT_MODEL_FALLBACK_ORDER.size());
-
-            String currentKey = getNextApiKey();
-            String fullUrl = GEMINI_URL_TEMPLATE.formatted(modelName) + "?key=" + currentKey;
+            String currentKey = getNextApiKey(keys);
+            String fullUrl = GEMINI_URL_TEMPLATE.formatted(TEXT_MODEL) + "?key=" + currentKey;
 
             Request request = new Request.Builder()
                     .url(fullUrl)
@@ -183,54 +181,58 @@ public class GeminiService {
                     .build();
 
             try (Response response = client.newCall(request).execute()) {
-
                 int code = response.code();
-
-                if (code == 429 || code >= 500) {
-                    lastError = "Sunucu Hatası: " + code;
-                    try { Thread.sleep(backoffMs); } catch (InterruptedException ignored) {}
-                    continue;
-                }
-
+                String responseBody = response.body() != null ? response.body().string() : "";
 
                 if (!response.isSuccessful()) {
-                    String responseBody = response.body() != null ? response.body().string() : "";
                     String providerError = extractProviderErrorMessage(responseBody);
+
                     lastError = providerError.isBlank()
-                            ? "Sunucu Hatası: " + code + " (" + modelName + ")"
-                            : providerError + " (" + modelName + ")";
+                            ? "Sunucu Hatası: " + code + " (" + TEXT_MODEL + ")"
+                            : providerError + " (" + TEXT_MODEL + ")";
 
-//                System.out.println("=== GEMINI HTTP ERROR ===");
-//                System.out.println("HTTP Code: " + code);
-//                System.out.println("Model: " + modelName);
-//                System.out.println("Response Body: " + responseBody);
+                    System.out.println("=== GEMINI HTTP ERROR ===");
+                    System.out.println("HTTP Code: " + code);
+                    System.out.println("Model: " + TEXT_MODEL);
+                    System.out.println("Response Body: " + responseBody);
 
-                    if (code == 400 || code == 403 || code == 404) {
+                    if (code == 429) {
+                        sleepQuietly(parseRetryDelayMs(response, providerError, backoffMs));
+                        backoffMs = Math.min(backoffMs * 2, 5000L);
                         continue;
                     }
 
-                    try { Thread.sleep(backoffMs); } catch (InterruptedException ignored) {}
+                    if (code >= 500) {
+                        sleepQuietly(backoffMs);
+                        backoffMs = Math.min(backoffMs * 2, 5000L);
+                        continue;
+                    }
+
+                    // 400 / 403 / 404 gibi hatalarda model değiştirmiyoruz.
+                    // Sadece varsa diğer API key denenir.
                     continue;
                 }
 
-                String responseBody = response.body() != null ? response.body().string() : "";
-                String aiRawText;
+                String aiRawText = extractModelText(responseBody);
 
-                try {
-                    JsonObject jsonObject = JsonParser.parseString(responseBody).getAsJsonObject();
-                    aiRawText = jsonObject.getAsJsonArray("candidates")
-                            .get(0).getAsJsonObject()
-                            .getAsJsonObject("content")
-                            .getAsJsonArray("parts")
-                            .get(0).getAsJsonObject()
-                            .get("text").getAsString();
-                } catch (Exception e) {
-                    lastError = "Yapay zeka cevabı okunamadı.";
+                if (aiRawText == null || aiRawText.isBlank()) {
+                    String finishReason = extractFinishReason(responseBody);
+
+                    lastError = finishReason.isBlank()
+                            ? "Yapay zeka cevabı boş döndü."
+                            : "Yapay zeka cevabı boş döndü. FinishReason: " + finishReason;
+
+                    System.out.println("=== GEMINI EMPTY TEXT RESPONSE ===");
+                    System.out.println("Model: " + TEXT_MODEL);
+                    System.out.println("Response Body: " + responseBody);
+
                     continue;
                 }
 
-//            System.out.println("=== GEMINI RAW RESPONSE ===");
-//            System.out.println(aiRawText);
+                System.out.println("=== GEMINI MODEL USED ===");
+                System.out.println(TEXT_MODEL);
+                System.out.println("=== GEMINI RAW TEXT ===");
+                System.out.println(aiRawText);
 
                 String cleanText = aiRawText
                         .replace("```json", "")
@@ -238,12 +240,10 @@ public class GeminiService {
                         .replace("```", "")
                         .trim();
 
-//            System.out.println("=== GEMINI CLEAN RESPONSE ===");
-//            System.out.println(cleanText);
-
                 if (cleanText.trim().equals("REJECT_SECURITY")) {
                     return generateErrorJson("Güvenlik Reddi: Lütfen sadece resmi yazışma konuları giriniz.");
                 }
+
                 if (cleanText.trim().equals("REJECT_OUT_OF_SCOPE")) {
                     return generateErrorJson("Görev dışı işlem: Bu servis yalnızca dilekçe oluşturma taleplerini işler.");
                 }
@@ -251,38 +251,189 @@ public class GeminiService {
                 cleanText = extractJsonIfAny(cleanText);
 
                 if (!isFinal && cleanText.startsWith("{")) {
-                    String normalized = normalizeDraftJson(cleanText, currentDate, userText);
-//                System.out.println("=== NORMALIZED DRAFT JSON ===");
-//                System.out.println(normalized);
-                    return normalized;
+                    return normalizeDraftJson(cleanText, currentDate, userText);
                 }
 
                 if (cleanText.startsWith("{") && cleanText.endsWith("}")) {
-//                System.out.println("=== RETURNING RAW JSON ===");
-//                System.out.println(cleanText);
                     return cleanText;
                 }
 
                 if (cleanText.contains("<div") || cleanText.contains("<p>")) {
-//                System.out.println("=== RETURNING HTML ===");
-//                System.out.println(cleanText);
                     return cleanText;
                 }
 
-//            System.out.println("=== INVALID FORMAT AFTER CLEAN ===");
-//            System.out.println(cleanText);
+                System.out.println("=== INVALID FORMAT AFTER CLEAN ===");
+                System.out.println(cleanText);
+
                 lastError = "Yapay zeka geçerli bir format üretemedi.";
 
             } catch (Exception e) {
-                lastError = "Bağlantı Hatası: Deneme başarısız.";
-                try { Thread.sleep(backoffMs); } catch (InterruptedException ignored) {}
+                lastError = "Bağlantı Hatası: " + e.getMessage();
+
+                System.out.println("=== GEMINI CONNECTION ERROR ===");
+                e.printStackTrace();
+
+                sleepQuietly(backoffMs);
+                backoffMs = Math.min(backoffMs * 2, 5000L);
             }
         }
 
-//        System.out.println("=== GEMINI FINAL FALLBACK ERROR ===");
-//        System.out.println(lastError);
+        System.out.println("=== GEMINI FINAL ERROR ===");
+        System.out.println(lastError);
 
         return generateErrorJson(lastError);
+    }
+
+    private String buildGeminiTextRequestBody(String systemInstructionText, String userText, boolean isFinal) {
+        JsonObject root = new JsonObject();
+
+        JsonObject systemInstruction = new JsonObject();
+        JsonArray systemParts = new JsonArray();
+
+        JsonObject systemTextPart = new JsonObject();
+        systemTextPart.addProperty("text", systemInstructionText);
+        systemParts.add(systemTextPart);
+
+        systemInstruction.add("parts", systemParts);
+        root.add("systemInstruction", systemInstruction);
+
+        JsonArray contents = new JsonArray();
+
+        JsonObject userContent = new JsonObject();
+        userContent.addProperty("role", "user");
+
+        JsonArray userParts = new JsonArray();
+
+        JsonObject userTextPart = new JsonObject();
+        userTextPart.addProperty("text", userText == null ? "" : userText);
+        userParts.add(userTextPart);
+
+        userContent.add("parts", userParts);
+        contents.add(userContent);
+
+        root.add("contents", contents);
+
+        JsonObject generationConfig = new JsonObject();
+        generationConfig.addProperty("temperature", 0.2);
+
+        // Eski 1400 / 1800 token Flash için az kalabiliyordu.
+        generationConfig.addProperty("maxOutputTokens", isFinal ? 8192 : 4096);
+
+        // DRAFT modunda JSON bekliyoruz.
+        // FINAL_BUILD modunda HTML beklediğimiz için JSON mode açmıyoruz.
+        if (!isFinal) {
+            generationConfig.addProperty("responseMimeType", "application/json");
+        }
+
+        root.add("generationConfig", generationConfig);
+
+        return gson.toJson(root);
+    }
+
+    private String extractModelText(String responseBody) {
+        try {
+            JsonObject root = JsonParser.parseString(responseBody).getAsJsonObject();
+
+            if (!root.has("candidates") || !root.get("candidates").isJsonArray()) {
+                return "";
+            }
+
+            JsonArray candidates = root.getAsJsonArray("candidates");
+
+            if (candidates.isEmpty()) {
+                return "";
+            }
+
+            JsonObject firstCandidate = candidates.get(0).getAsJsonObject();
+
+            if (!firstCandidate.has("content") || !firstCandidate.get("content").isJsonObject()) {
+                return "";
+            }
+
+            JsonObject content = firstCandidate.getAsJsonObject("content");
+
+            if (!content.has("parts") || !content.get("parts").isJsonArray()) {
+                return "";
+            }
+
+            JsonArray parts = content.getAsJsonArray("parts");
+
+            if (parts.isEmpty()) {
+                return "";
+            }
+
+            JsonObject firstPart = parts.get(0).getAsJsonObject();
+
+            if (!firstPart.has("text") || firstPart.get("text").isJsonNull()) {
+                return "";
+            }
+
+            return firstPart.get("text").getAsString();
+
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private String extractFinishReason(String responseBody) {
+        try {
+            JsonObject root = JsonParser.parseString(responseBody).getAsJsonObject();
+
+            if (!root.has("candidates") || !root.get("candidates").isJsonArray()) {
+                return "";
+            }
+
+            JsonArray candidates = root.getAsJsonArray("candidates");
+
+            if (candidates.isEmpty()) {
+                return "";
+            }
+
+            JsonObject firstCandidate = candidates.get(0).getAsJsonObject();
+
+            if (firstCandidate.has("finishReason") && !firstCandidate.get("finishReason").isJsonNull()) {
+                return firstCandidate.get("finishReason").getAsString();
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        return "";
+    }
+
+    private long parseRetryDelayMs(Response response, String providerError, long fallbackMs) {
+        String retryHeader = response.header("Retry-After");
+
+        if (retryHeader != null) {
+            try {
+                long sec = Long.parseLong(retryHeader.trim());
+                if (sec > 0) return sec * 1000L;
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (providerError != null && !providerError.isBlank()) {
+            Matcher matcher = Pattern.compile("(?i)(\\d+)\\s*(saniye|seconds?)").matcher(providerError);
+
+            if (matcher.find()) {
+                try {
+                    return Long.parseLong(matcher.group(1)) * 1000L;
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        return Math.max(1000L, fallbackMs);
+    }
+
+    private void sleepQuietly(long delayMs) {
+        if (delayMs <= 0) return;
+
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private String extractJsonIfAny(String text) {
