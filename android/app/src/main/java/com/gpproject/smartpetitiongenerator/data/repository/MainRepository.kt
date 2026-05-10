@@ -11,7 +11,6 @@ import com.gpproject.smartpetitiongenerator.data.remote.AiResponse
 import com.gpproject.smartpetitiongenerator.data.remote.ClientIdProvider
 import com.gpproject.smartpetitiongenerator.data.remote.InputField
 import com.gpproject.smartpetitiongenerator.data.remote.OcrLayoutRequest
-import com.gpproject.smartpetitiongenerator.data.remote.OcrLayoutResponse
 import com.gpproject.smartpetitiongenerator.data.remote.OcrQueueResponse
 import com.gpproject.smartpetitiongenerator.data.remote.UserPrompt
 import com.gpproject.smartpetitiongenerator.domain.ReadyPetitionTemplate
@@ -157,9 +156,14 @@ class MainRepository(
         isAiGenerated: Boolean = true
     ) {
         val requiredFields = extractInputFields(templateHtml)
+            .filterNot { isAiGenerated && it.key == "EKLER_LISTESI" }
         val payload = StoredTemplatePayload(
             templateHtml = templateHtml,
-            givenParams = givenParams,
+            givenParams = if (isAiGenerated) {
+                givenParams.filterKeys { it.uppercase() != "EKLER_LISTESI" }
+            } else {
+                givenParams
+            },
             requiredParams = requiredFields
         )
         val prefix = if (isAiGenerated) "ai" else "user"
@@ -231,7 +235,12 @@ class MainRepository(
         )
 
         return orderedKeys
-            .filterNot { it == "BUGUN_TARIH" || it == "EKLER_BOLUMU" }
+            .filterNot {
+                it == "BUGUN_TARIH" ||
+                        it == "EKLER_BOLUMU" ||
+                        it == "EKLER_LISTESI" ||
+                        it == "EK_VAR_MI"
+            }
             .map { key ->
                 InputField(
                     key = key,

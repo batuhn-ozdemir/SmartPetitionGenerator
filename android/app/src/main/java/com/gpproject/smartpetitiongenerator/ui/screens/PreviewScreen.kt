@@ -410,6 +410,13 @@ fun PreviewScreen(
                     } catch (err) {
                         document.execCommand('insertLineBreak', false, null);
                     }
+                    
+                    const selAfterEnter = window.getSelection && window.getSelection();
+                    const rangeAfterEnter = selAfterEnter && selAfterEnter.rangeCount > 0 ? selAfterEnter.getRangeAt(0) : null;
+                    const blockAfterEnter = rangeAfterEnter ? findEditableBlock(rangeAfterEnter.startContainer) : null;
+                    if (blockAfterEnter) {
+                        blockAfterEnter.style.textIndent = '0';
+                    }
                 }
                 setTimeout(keepCaretVisible, 0);
             };

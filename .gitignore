@@ -19,6 +19,8 @@ local.properties
 # 1. GENEL SİSTEM & IDE
 # ========================
 .idea/
+__pycache__/
+.pytest_cache/
 .vscode/
 *.iml
 .DS_Store

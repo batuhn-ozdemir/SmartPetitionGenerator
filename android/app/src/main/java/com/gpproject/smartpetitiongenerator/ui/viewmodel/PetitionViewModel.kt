@@ -154,10 +154,19 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         val attachments = params["EKLER_LISTESI"].orEmpty().trim()
         if (attachments.isBlank()) return ""
 
+        val attachmentRows = attachments
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+
+        if (attachmentRows.isEmpty()) return ""
+
+        val formattedRows = attachmentRows.joinToString("<br/>")
+
         return """
             <div class="contact-footer">
                 <b>Ekler:</b><br/>
-                $attachments
+                $formattedRows
             </div>
         """.trimIndent()
     }
@@ -273,7 +282,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                 draftMode = DraftMode.AI
                 lastUserPrompt = prompt
 
-                val initial = repository.startAiGeneration(prompt)
+                val initial = repository.startAiGeneration(buildNoAttachmentsInstructionPrompt(prompt))
                 if (initial.status == "FAILED") {
                     _aiState.value = AiState.Error(initial.payload ?: "Sunucu şu anda yoğun. Lütfen tekrar deneyin.")
                     return@launch
@@ -320,7 +329,9 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
 
                 val parsed = gson.fromJson(payload, AiGeneratedPetition::class.java)
 
-                val template = parsed.templateHtml?.trim()
+                val template = parsed.templateHtml
+                    ?.trim()
+                    ?.let(::stripAttachmentsParametersForTemplateSave)
                 if (template.isNullOrBlank()) {
                     _aiState.value = AiState.Error("Yapay zeka geçerli bir şablon üretemedi. Lütfen tekrar deneyin.")
                     return@launch
@@ -354,8 +365,13 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                     return@launch
                 }
 
-                val given = parsed.givenParams ?: emptyMap()
-                val required = parsed.requiredParams ?: emptyList()
+                val given = (parsed.givenParams ?: emptyMap())
+                    .filterKeys { canonicalKey(it) != "EKLER_LISTESI" && canonicalKey(it) != "EKLER_BOLUMU" }
+                val required = (parsed.requiredParams ?: emptyList())
+                    .filterNot {
+                        val key = canonicalKey(it.key)
+                        key == "EKLER_LISTESI" || key == "EKLER_BOLUMU" || key == "EK_VAR_MI"
+                    }
 
                 // template + given + required + kişisel -> form alanları
                 val fieldsForForm = buildFormFields(template, given, required)
@@ -381,6 +397,17 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                 _aiState.value = AiState.Error("Hata: ${e.localizedMessage}")
             }
         }
+    }
+
+    private fun buildNoAttachmentsInstructionPrompt(userPrompt: String): String {
+        return buildString {
+            appendLine(userPrompt.trim())
+            appendLine()
+            appendLine("EK KURAL (ZORUNLU):")
+            appendLine("- Dilekçe taslağında ve templateHtml içinde EK/EKLER bölümü üretme.")
+            appendLine("- {{EKLER_LISTESI}}, {{EKLER_BOLUMU}}, EK_VAR_MI gibi alanları ASLA üretme.")
+            appendLine("- givenParams ve requiredParams içinde ekler ile ilgili hiçbir anahtar döndürme.")
+        }.trim()
     }
 
     fun submitDynamicForm(petitionData: AiGeneratedPetition, userInputs: Map<String, String>) {
@@ -472,7 +499,8 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             val value = params[key].orEmpty().trim()
 
             when {
-                key == "EKLER_BOLUMU" || key == "EKLER_LISTESI" || key == "EK_VAR_MI" -> ""
+                key == "EKLER_BOLUMU" || key == "EKLER_LISTESI" -> value
+                key == "EK_VAR_MI" -> ""
                 value.isNotBlank() -> value
                 else -> match.value
             }
@@ -744,21 +772,36 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
     // ✅ AI ile üretilen taslağı, ready_templates formatında DB'ye göm
     fun saveAsTemplate(templateName: String, aiData: AiGeneratedPetition) {
         viewModelScope.launch {
-            val template = aiData.templateHtml?.trim()
+            val template = aiData.templateHtml
+                ?.trim()
+                ?.let(::stripAttachmentsParametersForTemplateSave)
             if (template.isNullOrBlank()) {
                 _aiState.value = AiState.Error("Şablon kaydedilemedi: şablon boş.")
                 return@launch
             }
 
+            val sanitizedGivenParams = aiData.givenParams
+                ?.filterKeys { canonicalKey(it) != "EKLER_LISTESI" }
+                ?: emptyMap()
+
             repository.saveUserTemplateAsReadyTemplate(
                 title = templateName,
                 templateHtml = template,
-                givenParams = aiData.givenParams ?: emptyMap(),
+                givenParams = sanitizedGivenParams,
                 isAiGenerated = true
             )
 
             loadReadyTemplates()
         }
+    }
+
+    private fun stripAttachmentsParametersForTemplateSave(templateHtml: String): String {
+        return templateHtml
+            .replace("{{EKLER_LISTESI}}", "")
+            .replace("{{ EKLER_LISTESI }}", "")
+            .replace("{{EKLER_BOLUMU}}", "")
+            .replace("{{ EKLER_BOLUMU }}", "")
+            .trim()
     }
 
     private fun extractA4InnerHtml(wrappedHtml: String): String {
@@ -811,8 +854,39 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             }
         }
 
+        sanitized = stripAttachmentContentForTemplate(sanitized)
+
         return sanitized.trim()
     }
+
+    private fun stripAttachmentContentForTemplate(html: String): String {
+        if (html.isBlank()) return html
+
+        var normalized = html
+
+        normalized = normalized.replace(
+            Regex("""<div\s+class=["']attachments-left["'][^>]*>[\s\S]*?</div>""", RegexOption.IGNORE_CASE)
+        ) { match ->
+            val openTag = Regex(
+                """^<div\s+class=["']attachments-left["'][^>]*>""",
+                RegexOption.IGNORE_CASE
+            ).find(match.value)?.value ?: "<div class=\"attachments-left\">"
+            "$openTag</div>"
+        }
+
+        normalized = normalized.replace(
+            Regex("""\{\{\s*EKLER_LISTESI\s*\}\}""", RegexOption.IGNORE_CASE),
+            ""
+        )
+
+        normalized = normalized.replace(
+            Regex("""\{\{\s*EKLER_BOLUMU\s*\}\}""", RegexOption.IGNORE_CASE),
+            ""
+        )
+
+        return normalized
+    }
+
 
     fun saveCurrentPreviewAsTemplate(
         templateName: String,
