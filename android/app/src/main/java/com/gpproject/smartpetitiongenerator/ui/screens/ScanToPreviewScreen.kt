@@ -1,55 +1,107 @@
 package com.gpproject.smartpetitiongenerator.ui.screens
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Matrix
+import android.graphics.Paint
 import android.net.Uri
-import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.PickVisualMediaRequest
-import androidx.core.content.FileProvider
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.border
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+//import androidx.compose.ui.input.pointer.consume
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.navigation.NavController
-import android.content.Context
-import android.graphics.Matrix
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
-import java.io.ByteArrayInputStream
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.navigation.NavController
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.GeminiOcrPreviewResult
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.PetitionViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.roundToInt
+
+private enum class ScanStep {
+    START,
+    CAMERA,
+    CROP
+}
+
+private enum class CornerDragTarget {
+    NONE,
+    TOP_LEFT,
+    TOP_RIGHT,
+    BOTTOM_RIGHT,
+    BOTTOM_LEFT,
+    MOVE
+}
+
+private data class DocumentCorners(
+    val topLeft: Offset,
+    val topRight: Offset,
+    val bottomRight: Offset,
+    val bottomLeft: Offset
+)
 
 @Composable
 fun ScanToPreviewScreen(
@@ -59,48 +111,205 @@ fun ScanToPreviewScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
-    var selectedImageBytes by remember { mutableStateOf<ByteArray?>(null) }
-    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var step by remember { mutableStateOf(ScanStep.START) }
+    var sourceBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var corners by remember { mutableStateOf(defaultDocumentCorners()) }
+
     var isProcessing by remember { mutableStateOf(false) }
-    var statusText by remember { mutableStateOf("Fotoğraf çekin veya galeriden seçip OCR başlatın.") }
+    var statusText by remember {
+        mutableStateOf("Fotoğraf çekin veya galeriden seçin. OCR'a gitmeden önce 4 köşe seçilecek.")
+    }
     var warningText by remember { mutableStateOf<String?>(null) }
 
     val pickImageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         viewModel.clearCurrentPreview()
-        selectedImageUri = uri
-        selectedImageBytes = null
-        statusText = if (uri != null) {
-            "Görsel seçildi. Gemini ile dilekçe tespiti ve konumsal OCR için hazır."
-        } else {
-            "Görsel seçimi iptal edildi."
-        }
         warningText = null
+
+        if (uri == null) {
+            statusText = "Görsel seçimi iptal edildi."
+            return@rememberLauncherForActivityResult
+        }
+
+        val bitmap = decodeBitmapFullRespectingOrientation(
+            context = context,
+            imageUri = uri
+        )
+
+        if (bitmap == null) {
+            statusText = "Görsel açılamadı."
+            warningText = "Seçilen fotoğraf okunamadı. Lütfen farklı bir görsel deneyin."
+            return@rememberLauncherForActivityResult
+        }
+
+        sourceBitmap = bitmap
+        corners = defaultDocumentCorners()
+        step = ScanStep.CROP
+        statusText = "Görsel seçildi. Belgenin 4 köşesini sürükleyerek seçin."
     }
 
-    val takePhotoLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicture()
-    ) { isSuccess ->
-        viewModel.clearCurrentPreview()
-        val capturedUri = pendingCameraUri
-        selectedImageBytes = null
-        selectedImageUri = if (isSuccess) capturedUri else null
-        statusText = if (isSuccess && capturedUri != null) {
-            "Fotoğraf çekildi (yüksek çözünürlük). Gemini ile dilekçe tespiti ve konumsal OCR için hazır."
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            warningText = null
+            step = ScanStep.CAMERA
         } else {
-            "Fotoğraf çekimi iptal edildi."
+            warningText = "Kamera izni verilmedi."
+            statusText = "Fotoğraf çekimi için kamera izni gerekiyor."
         }
-        pendingCameraUri = null
-        warningText = null
     }
 
+    KeepScreenAwake(isProcessing)
+
+    when (step) {
+        ScanStep.START -> {
+            StartStepContent(
+                statusText = statusText,
+                warningText = warningText,
+                onPickImage = {
+                    pickImageLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                },
+                onOpenCamera = {
+                    val granted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+
+                    if (granted) {
+                        warningText = null
+                        step = ScanStep.CAMERA
+                    } else {
+                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
+                }
+            )
+        }
+
+        ScanStep.CAMERA -> {
+            CameraCaptureStep(
+                onCaptured = { file ->
+                    viewModel.clearCurrentPreview()
+                    warningText = null
+
+                    val bitmap = decodeBitmapFullRespectingOrientation(file)
+
+                    if (bitmap == null) {
+                        statusText = "Çekilen fotoğraf okunamadı."
+                        warningText = "Fotoğraf dosyası çözümlenemedi. Lütfen tekrar deneyin."
+                        step = ScanStep.START
+                        return@CameraCaptureStep
+                    }
+
+                    sourceBitmap = bitmap
+                    corners = defaultDocumentCorners()
+                    step = ScanStep.CROP
+                    statusText = "Fotoğraf çekildi. Belgenin 4 köşesini sürükleyerek seçin."
+                },
+                onCancel = {
+                    step = ScanStep.START
+                    statusText = "Fotoğraf çekimi iptal edildi."
+                },
+                onError = { message ->
+                    warningText = message
+                    statusText = "Fotoğraf çekimi başarısız oldu."
+                    step = ScanStep.START
+                }
+            )
+        }
+
+        ScanStep.CROP -> {
+            val bitmap = sourceBitmap
+
+            if (bitmap == null) {
+                step = ScanStep.START
+                statusText = "Görsel bulunamadı. Lütfen tekrar seçin."
+                return
+            }
+
+            CropStepContent(
+                bitmap = bitmap,
+                corners = corners,
+                onCornersChange = { corners = it },
+                isProcessing = isProcessing,
+                statusText = statusText,
+                warningText = warningText,
+                onBack = {
+                    sourceBitmap = null
+                    corners = defaultDocumentCorners()
+                    step = ScanStep.START
+                    statusText = "Fotoğraf çekin veya galeriden seçin. OCR'a gitmeden önce 4 köşe seçilecek."
+                    warningText = null
+                },
+                onResetCorners = {
+                    corners = defaultDocumentCorners()
+                },
+                onStartOcr = {
+                    scope.launch {
+                        isProcessing = true
+                        warningText = null
+                        statusText = "Seçilen dörtgen düzeltilip PNG olarak AI'ye gönderiliyor..."
+
+                        val result = runCatching {
+                            withContext(Dispatchers.Default) {
+                                val correctedBitmap = perspectiveCorrectBitmap(
+                                    source = bitmap,
+                                    corners = corners
+                                )
+
+                                val pngBytes = bitmapToLosslessPngBytes(correctedBitmap)
+
+                                if (correctedBitmap != bitmap && !correctedBitmap.isRecycled) {
+                                    correctedBitmap.recycle()
+                                }
+
+                                viewModel.createPreviewFromGeminiDocumentLayout(
+                                    imageBytes = pngBytes,
+                                    mimeType = "image/png"
+                                )
+                            }
+                        }.getOrElse { error ->
+                            GeminiOcrPreviewResult.Error(
+                                error.localizedMessage ?: "Bilinmeyen hata"
+                            )
+                        }
+
+                        when (result) {
+                            is GeminiOcrPreviewResult.Success -> {
+                                statusText = "Tamamlandı: Belge alanı çözümlendi (güven: ${
+                                    "%.2f".format(Locale.US, result.confidence)
+                                })."
+                                navController.navigate("preview_screen/new")
+                            }
+
+                            is GeminiOcrPreviewResult.Error -> {
+                                statusText = "Okuma başarısız oldu."
+                                warningText = result.message
+                            }
+                        }
+
+                        isProcessing = false
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun StartStepContent(
+    statusText: String,
+    warningText: String?,
+    onPickImage: () -> Unit,
+    onOpenCamera: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -109,211 +318,500 @@ fun ScanToPreviewScreen(
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold
         )
+
         Text(
-            "Bu akışta AI size elinizde bulunan dilekçe için hızlı bir yazdırma yapmaya çalışır. Hata yapabilir, beğenmediğiniz yerleştirmeleri elle düzenlemeniz gerekir. " +
-                    "Uzun dilekçelerde hata gösterilir. Bu işlem biraz uzun sürebilir.",
+            "Fotoğraf seçildikten veya çekildikten sonra belgenin 4 köşesini seçeceksiniz. " +
+                    "Yamuk çekilmiş belge perspective transform ile düzleştirilir ve AI'ye sadece seçilen alan gönderilir.",
             style = MaterialTheme.typography.bodyLarge
         )
 
-        androidx.compose.foundation.layout.Row(
+        Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally)
         ) {
-            OutlinedButton(
-                onClick = {
-                    pickImageLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                }
-            ) {
+            OutlinedButton(onClick = onPickImage) {
                 Text("Fotoğraf Seç", style = MaterialTheme.typography.titleMedium)
             }
-            OutlinedButton(onClick = {
-                val uri = createTempImageUri(context)
-                if (uri == null) {
-                    warningText = "Kamera için geçici dosya hazırlanamadı. Lütfen tekrar deneyin."
-                    statusText = "Fotoğraf çekimi başlatılamadı."
-                    return@OutlinedButton
-                }
-                pendingCameraUri = uri
-                takePhotoLauncher.launch(uri)
-            }) {
+
+            OutlinedButton(onClick = onOpenCamera) {
                 Text("Fotoğraf Çek", style = MaterialTheme.typography.titleMedium)
-            }
-        }
-
-        SelectedImagePreview(
-            selectedImageUri = selectedImageUri,
-            selectedImageBytes = selectedImageBytes
-        )
-
-        Button(
-            enabled = !isProcessing && (selectedImageUri != null || selectedImageBytes != null),
-            onClick = {
-                val imageUri = selectedImageUri
-                val inMemoryBytes = selectedImageBytes
-
-                scope.launch {
-                    isProcessing = true
-                    warningText = null
-                    statusText = "Okuma yapılıyor..."
-
-                    val result = runCatching {
-                        val preparedImage = prepareImageForOcr(
-                            context = context,
-                            imageUri = imageUri,
-                            originalBytes = inMemoryBytes
-                        )
-
-                        viewModel.createPreviewFromGeminiDocumentLayout(
-                            imageBytes = preparedImage.bytes,
-                            mimeType = preparedImage.mimeType
-                        )
-                    }.getOrElse { error ->
-                        GeminiOcrPreviewResult.Error(error.localizedMessage ?: "Bilinmeyen hata")
-                    }
-
-                    when (result) {
-                        is GeminiOcrPreviewResult.Success -> {
-                            statusText = "Tamamlandı: Dilekçe düzeni Gemini ile çözümlendi (güven: ${"%.2f".format(Locale.US, result.confidence)})."
-                            navController.navigate("preview_screen/new")
-                        }
-                        is GeminiOcrPreviewResult.Error -> {
-                            statusText = "Okuma başarısız oldu."
-                            warningText = result.message
-                        }
-                    }
-
-                    isProcessing = false
-                }
-            }
-        ) {
-            if (isProcessing) {
-                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-            } else {
-                Text("Oku ve Önizle", style = MaterialTheme.typography.titleMedium)
             }
         }
 
         Text(statusText, style = MaterialTheme.typography.bodyLarge)
 
         warningText?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyLarge
+            )
         }
     }
 }
 
 @Composable
-private fun SelectedImagePreview(
-    selectedImageUri: Uri?,
-    selectedImageBytes: ByteArray?
+private fun CropStepContent(
+    bitmap: Bitmap,
+    corners: DocumentCorners,
+    onCornersChange: (DocumentCorners) -> Unit,
+    isProcessing: Boolean,
+    statusText: String,
+    warningText: String?,
+    onBack: () -> Unit,
+    onResetCorners: () -> Unit,
+    onStartOcr: () -> Unit
 ) {
-    val context = LocalContext.current
-    var previewBitmap by remember(selectedImageUri, selectedImageBytes) { mutableStateOf<Bitmap?>(null) }
-
-    LaunchedEffect(selectedImageUri, selectedImageBytes) {
-        previewBitmap = when {
-            selectedImageBytes != null -> BitmapFactory.decodeByteArray(selectedImageBytes, 0, selectedImageBytes.size)
-            selectedImageUri != null -> context.contentResolver.openInputStream(selectedImageUri)?.use { input ->
-                BitmapFactory.decodeStream(input)
-            }
-            else -> null
-        }
-    }
-
-    if (previewBitmap != null) {
-        Image(
-            bitmap = previewBitmap!!.asImageBitmap(),
-            contentDescription = "Seçilen fotoğraf önizleme",
-            modifier = Modifier
-                .size(170.dp)
-                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
-                .padding(4.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            "Belgenin 4 Köşesini Seç",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold
         )
-    } else {
-        Spacer(modifier = Modifier.height(4.dp))
+
+        Text(
+            "Her beyaz noktayı belgenin gerçek köşesine sürükle. Köşeyi yakalayınca parmağını kaldırana kadar bırakmaz.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+
+        DocumentCornerPicker(
+            bitmap = bitmap,
+            corners = corners,
+            onCornersChange = onCornersChange,
+            interactionEnabled = !isProcessing,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            OutlinedButton(
+                onClick = onBack,
+                modifier = Modifier.weight(1f),
+                enabled = !isProcessing
+            ) {
+                Text("Geri")
+            }
+
+            OutlinedButton(
+                onClick = onResetCorners,
+                modifier = Modifier.weight(1f),
+                enabled = !isProcessing
+            ) {
+                Text("Sıfırla")
+            }
+        }
+
+        Button(
+            onClick = onStartOcr,
+            enabled = !isProcessing,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (isProcessing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp
+                )
+            } else {
+                Text("Düzelt ve OCR Başlat")
+            }
+        }
+
+        Text(statusText, style = MaterialTheme.typography.bodyMedium)
+
+        warningText?.let {
+            Text(
+                text = it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
     }
 }
 
-private data class PreparedImage(
-    val bytes: ByteArray,
-    val mimeType: String
-)
+@Composable
+private fun DocumentCornerPicker(
+    bitmap: Bitmap,
+    corners: DocumentCorners,
+    onCornersChange: (DocumentCorners) -> Unit,
+    interactionEnabled: Boolean,
+    modifier: Modifier = Modifier
+) {
+    var containerWidth by remember { mutableIntStateOf(0) }
+    var containerHeight by remember { mutableIntStateOf(0) }
 
-private fun prepareImageForOcr(
-    context: Context,
-    imageUri: Uri?,
-    originalBytes: ByteArray?,
-    maxLongEdgePx: Int = 2560,
-    preferredQuality: Int = 95,
-    softPayloadLimitBytes: Int = 7_500_000
-): PreparedImage {
-    val sourceBytes = when {
-        originalBytes != null -> originalBytes
-        imageUri != null -> context.contentResolver.openInputStream(imageUri)?.use { it.readBytes() }
-            ?: error("Görsel açılamadı")
-        else -> error("Görsel bulunamadı")
+    val imageDrawRect = remember(containerWidth, containerHeight, bitmap.width, bitmap.height) {
+        calculateFittedImageRect(
+            containerWidth = containerWidth.toFloat(),
+            containerHeight = containerHeight.toFloat(),
+            bitmapWidth = bitmap.width.toFloat(),
+            bitmapHeight = bitmap.height.toFloat()
+        )
     }
 
-    val normalizedBitmap = decodeBitmapRespectingOrientation(
-        context = context,
-        imageUri = imageUri,
-        sourceBytes = sourceBytes,
-        maxLongEdgePx = maxLongEdgePx
-    ) ?: return PreparedImage(sourceBytes, "image/jpeg")
+    val currentCorners by rememberUpdatedState(corners)
+    val currentImageDrawRect by rememberUpdatedState(imageDrawRect)
+    val currentOnCornersChange by rememberUpdatedState(onCornersChange)
 
-    val output = ByteArrayOutputStream()
-    var quality = preferredQuality
-    normalizedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
+    Box(
+        modifier = modifier
+            .background(Color.Black)
+            .onSizeChanged {
+                containerWidth = it.width
+                containerHeight = it.height
+            }
+            .pointerInput(interactionEnabled) {
+                if (!interactionEnabled) return@pointerInput
 
-    while (output.size() > softPayloadLimitBytes && quality > 82) {
-        output.reset()
-        quality -= 4
-        normalizedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+
+                    val rectAtDown = currentImageDrawRect
+                    val cornersAtDown = currentCorners
+
+                    val dragTarget = detectCornerDragTarget(
+                        touch = down.position,
+                        imageRect = rectAtDown,
+                        corners = cornersAtDown
+                    )
+
+                    if (dragTarget == CornerDragTarget.NONE) {
+                        return@awaitEachGesture
+                    }
+
+                    down.consume()
+
+                    val activePointerId = down.id
+                    var gestureCorners = cornersAtDown
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == activePointerId }
+
+                        if (change == null || !change.pressed) {
+                            break
+                        }
+
+                        val dragAmount = change.position - change.previousPosition
+                        val activeImageRect = currentImageDrawRect
+
+                        if (
+                            activeImageRect.width > 0f &&
+                            activeImageRect.height > 0f &&
+                            (dragAmount.x != 0f || dragAmount.y != 0f)
+                        ) {
+                            val dx = dragAmount.x / activeImageRect.width
+                            val dy = dragAmount.y / activeImageRect.height
+
+                            val nextCorners = updateDocumentCornersByDrag(
+                                corners = gestureCorners,
+                                target = dragTarget,
+                                dx = dx,
+                                dy = dy
+                            )
+
+                            gestureCorners = nextCorners
+                            currentOnCornersChange(nextCorners)
+                            change.consume()
+                        }
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Belge köşe seçimi",
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Fit
+        )
+
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            if (imageDrawRect.width <= 0f || imageDrawRect.height <= 0f) return@Canvas
+
+            val p1 = corners.topLeft.toScreenOffset(imageDrawRect)
+            val p2 = corners.topRight.toScreenOffset(imageDrawRect)
+            val p3 = corners.bottomRight.toScreenOffset(imageDrawRect)
+            val p4 = corners.bottomLeft.toScreenOffset(imageDrawRect)
+
+            drawLine(Color.White, p1, p2, strokeWidth = 5f)
+            drawLine(Color.White, p2, p3, strokeWidth = 5f)
+            drawLine(Color.White, p3, p4, strokeWidth = 5f)
+            drawLine(Color.White, p4, p1, strokeWidth = 5f)
+
+            drawCornerHandle(p1)
+            drawCornerHandle(p2)
+            drawCornerHandle(p3)
+            drawCornerHandle(p4)
+        }
+
+//        Text(
+//            text = "1 sol üst • 2 sağ üst • 3 sağ alt • 4 sol alt",
+//            color = Color.White,
+//            modifier = Modifier
+//                .align(Alignment.TopCenter)
+//                .padding(top = 12.dp)
+//                .background(Color.Black.copy(alpha = 0.55f), MaterialTheme.shapes.small)
+//                .padding(horizontal = 10.dp, vertical = 6.dp)
+//        )
+    }
+}
+
+@Composable
+private fun CameraCaptureStep(
+    onCaptured: (File) -> Unit,
+    onCancel: () -> Unit,
+    onError: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+
+    var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching {
+                cameraProviderFuture.get().unbindAll()
+            }
+        }
     }
 
-    normalizedBitmap.recycle()
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                val previewView = PreviewView(ctx).apply {
+                    scaleType = PreviewView.ScaleType.FIT_CENTER
+                }
 
-    val jpegBytes = output.toByteArray()
-    output.close()
+                cameraProviderFuture.addListener(
+                    {
+                        val cameraProvider = cameraProviderFuture.get()
 
-    return PreparedImage(
-        bytes = jpegBytes,
-        mimeType = "image/jpeg"
+                        val preview = Preview.Builder()
+                            .build()
+                            .also {
+                                it.setSurfaceProvider(previewView.surfaceProvider)
+                            }
+
+                        val capture = ImageCapture.Builder()
+                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                            .build()
+
+                        imageCapture = capture
+
+                        runCatching {
+                            cameraProvider.unbindAll()
+                            cameraProvider.bindToLifecycle(
+                                lifecycleOwner,
+                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                preview,
+                                capture
+                            )
+                        }.onFailure {
+                            onError("Kamera başlatılamadı: ${it.localizedMessage ?: "Bilinmeyen hata"}")
+                        }
+                    },
+                    ContextCompat.getMainExecutor(ctx)
+                )
+
+                previewView
+            }
+        )
+
+        Surface(
+            color = Color.Black.copy(alpha = 0.55f),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 24.dp)
+        ) {
+            Text(
+                text = "Kağıdı köşe rehberlerinin içine yerleştir",
+                color = Color.White,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(24.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(
+                onClick = onCancel,
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = Color.White
+                )
+            ) {
+                Text("Vazgeç")
+            }
+
+            Button(
+                onClick = {
+                    val capture = imageCapture
+                    if (capture == null) {
+                        onError("Kamera henüz hazır değil. Lütfen tekrar deneyin.")
+                        return@Button
+                    }
+
+                    val file = File.createTempFile(
+                        "ocr_capture_",
+                        ".jpg",
+                        context.cacheDir
+                    )
+
+                    val outputOptions = ImageCapture.OutputFileOptions
+                        .Builder(file)
+                        .build()
+
+                    capture.takePicture(
+                        outputOptions,
+                        ContextCompat.getMainExecutor(context),
+                        object : ImageCapture.OnImageSavedCallback {
+                            override fun onImageSaved(
+                                outputFileResults: ImageCapture.OutputFileResults
+                            ) {
+                                onCaptured(file)
+                            }
+
+                            override fun onError(exception: ImageCaptureException) {
+                                onError(
+                                    exception.localizedMessage
+                                        ?: "Fotoğraf kaydedilemedi."
+                                )
+                            }
+                        }
+                    )
+                }
+            ) {
+                Text("Çek")
+            }
+        }
+    }
+}
+
+@Composable
+private fun CameraCornerGuideOverlay(
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val marginX = size.width * 0.08f
+        val marginY = size.height * 0.12f
+
+        val left = marginX
+        val top = marginY
+        val right = size.width - marginX
+        val bottom = size.height - marginY
+
+        val cornerLength = 80f
+        val stroke = 8f
+        val color = Color.White
+
+        fun drawCorner(x: Float, y: Float, dirX: Float, dirY: Float) {
+            drawLine(
+                color = color,
+                start = Offset(x, y),
+                end = Offset(x + dirX * cornerLength, y),
+                strokeWidth = stroke
+            )
+
+            drawLine(
+                color = color,
+                start = Offset(x, y),
+                end = Offset(x, y + dirY * cornerLength),
+                strokeWidth = stroke
+            )
+        }
+
+        drawCorner(left, top, 1f, 1f)
+        drawCorner(right, top, -1f, 1f)
+        drawCorner(left, bottom, 1f, -1f)
+        drawCorner(right, bottom, -1f, -1f)
+    }
+}
+
+@Composable
+private fun KeepScreenAwake(enabled: Boolean) {
+    val view = LocalView.current
+    DisposableEffect(view, enabled) {
+        val previous = view.keepScreenOn
+        if (enabled) view.keepScreenOn = true
+        onDispose {
+            view.keepScreenOn = previous
+        }
+    }
+}
+
+private fun defaultDocumentCorners(): DocumentCorners {
+    return DocumentCorners(
+        topLeft = Offset(0.08f, 0.08f),
+        topRight = Offset(0.92f, 0.08f),
+        bottomRight = Offset(0.92f, 0.92f),
+        bottomLeft = Offset(0.08f, 0.92f)
     )
 }
 
-private fun decodeBitmapRespectingOrientation(
+private fun decodeBitmapFullRespectingOrientation(
     context: Context,
-    imageUri: Uri?,
-    sourceBytes: ByteArray,
-    maxLongEdgePx: Int
+    imageUri: Uri
 ): Bitmap? {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(sourceBytes, 0, sourceBytes.size, bounds)
+    return runCatching {
+        val sourceBytes = context.contentResolver.openInputStream(imageUri)?.use {
+            it.readBytes()
+        } ?: return null
 
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val bitmap = BitmapFactory.decodeByteArray(
+            sourceBytes,
+            0,
+            sourceBytes.size,
+            BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+        ) ?: return null
 
-    val largest = maxOf(bounds.outWidth, bounds.outHeight)
-    val sampleSize = if (largest <= maxLongEdgePx) {
-        1
-    } else {
-        var sample = 1
-        while (largest / sample > maxLongEdgePx) sample *= 2
-        sample
-    }
+        val orientation = resolveExifOrientation(
+            context = context,
+            imageUri = imageUri,
+            sourceBytes = sourceBytes
+        )
 
-    val bitmap = BitmapFactory.decodeByteArray(
-        sourceBytes,
-        0,
-        sourceBytes.size,
-        BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-        }
-    ) ?: return null
+        bitmap.rotateByExifOrientation(orientation)
+    }.getOrNull()
+}
 
-    val orientation = resolveExifOrientation(context, imageUri, sourceBytes)
-    return bitmap.rotateByExifOrientation(orientation)
+private fun decodeBitmapFullRespectingOrientation(file: File): Bitmap? {
+    return runCatching {
+        val sourceBytes = file.readBytes()
+
+        val bitmap = BitmapFactory.decodeByteArray(
+            sourceBytes,
+            0,
+            sourceBytes.size,
+            BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+        ) ?: return null
+
+        val orientation = ExifInterface(file.absolutePath).getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )
+
+        bitmap.rotateByExifOrientation(orientation)
+    }.getOrNull()
 }
 
 private fun resolveExifOrientation(
@@ -331,6 +829,7 @@ private fun resolveExifOrientation(
                     )
                 } ?: ExifInterface.ORIENTATION_NORMAL
             }
+
             else -> {
                 ByteArrayInputStream(sourceBytes).use { input ->
                     ExifInterface(input).getAttributeInt(
@@ -352,43 +851,299 @@ private fun Bitmap.rotateByExifOrientation(orientation: Int): Bitmap {
         ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
         ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
         ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+
         ExifInterface.ORIENTATION_TRANSPOSE -> {
             matrix.preScale(-1f, 1f)
             matrix.postRotate(270f)
         }
+
         ExifInterface.ORIENTATION_TRANSVERSE -> {
             matrix.preScale(-1f, 1f)
             matrix.postRotate(90f)
         }
+
         else -> return this
     }
 
-    return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true).also {
-        if (it != this) recycle()
+    return Bitmap.createBitmap(
+        this,
+        0,
+        0,
+        width,
+        height,
+        matrix,
+        true
+    ).also {
+        if (it != this && !this.isRecycled) {
+            this.recycle()
+        }
     }
 }
 
-private fun Bitmap.toJpegBytes(
-    quality: Int = 92
-): ByteArray {
+private fun perspectiveCorrectBitmap(
+    source: Bitmap,
+    corners: DocumentCorners
+): Bitmap {
+    val srcTopLeft = corners.topLeft.toBitmapPoint(source)
+    val srcTopRight = corners.topRight.toBitmapPoint(source)
+    val srcBottomRight = corners.bottomRight.toBitmapPoint(source)
+    val srcBottomLeft = corners.bottomLeft.toBitmapPoint(source)
+
+    val topWidth = distance(srcTopLeft, srcTopRight)
+    val bottomWidth = distance(srcBottomLeft, srcBottomRight)
+    val leftHeight = distance(srcTopLeft, srcBottomLeft)
+    val rightHeight = distance(srcTopRight, srcBottomRight)
+
+    val outputWidth = max(topWidth, bottomWidth).roundToInt().coerceAtLeast(1)
+    val outputHeight = max(leftHeight, rightHeight).roundToInt().coerceAtLeast(1)
+
+    val outputBitmap = Bitmap.createBitmap(
+        outputWidth,
+        outputHeight,
+        Bitmap.Config.ARGB_8888
+    )
+
+    val src = floatArrayOf(
+        srcTopLeft.x, srcTopLeft.y,
+        srcTopRight.x, srcTopRight.y,
+        srcBottomRight.x, srcBottomRight.y,
+        srcBottomLeft.x, srcBottomLeft.y
+    )
+
+    val dst = floatArrayOf(
+        0f, 0f,
+        outputWidth.toFloat(), 0f,
+        outputWidth.toFloat(), outputHeight.toFloat(),
+        0f, outputHeight.toFloat()
+    )
+
+    val matrix = Matrix()
+    val success = matrix.setPolyToPoly(src, 0, dst, 0, 4)
+
+    if (!success) {
+        error("Perspektif düzeltme yapılamadı. Köşeleri tekrar seçin.")
+    }
+
+    val canvas = AndroidCanvas(outputBitmap)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    canvas.drawBitmap(source, matrix, paint)
+
+    return outputBitmap
+}
+
+private fun bitmapToLosslessPngBytes(bitmap: Bitmap): ByteArray {
     val output = ByteArrayOutputStream()
-    compress(Bitmap.CompressFormat.JPEG, quality, output)
+    bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
     return output.toByteArray().also {
         output.close()
     }
 }
 
-private fun createTempImageUri(context: android.content.Context): Uri? {
-    return runCatching {
-        val tempFile = File.createTempFile(
-            "ocr_capture_",
-            ".jpg",
-            context.cacheDir
+private fun calculateFittedImageRect(
+    containerWidth: Float,
+    containerHeight: Float,
+    bitmapWidth: Float,
+    bitmapHeight: Float
+): Rect {
+    if (
+        containerWidth <= 0f ||
+        containerHeight <= 0f ||
+        bitmapWidth <= 0f ||
+        bitmapHeight <= 0f
+    ) {
+        return Rect(0f, 0f, 0f, 0f)
+    }
+
+    val containerAspect = containerWidth / containerHeight
+    val imageAspect = bitmapWidth / bitmapHeight
+
+    return if (imageAspect > containerAspect) {
+        val drawWidth = containerWidth
+        val drawHeight = drawWidth / imageAspect
+        val top = (containerHeight - drawHeight) / 2f
+
+        Rect(
+            left = 0f,
+            top = top,
+            right = drawWidth,
+            bottom = top + drawHeight
         )
-        FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            tempFile
+    } else {
+        val drawHeight = containerHeight
+        val drawWidth = drawHeight * imageAspect
+        val left = (containerWidth - drawWidth) / 2f
+
+        Rect(
+            left = left,
+            top = 0f,
+            right = left + drawWidth,
+            bottom = drawHeight
         )
-    }.getOrNull()
+    }
+}
+
+private fun Offset.toScreenOffset(imageRect: Rect): Offset {
+    return Offset(
+        x = imageRect.left + x.coerceIn(0f, 1f) * imageRect.width,
+        y = imageRect.top + y.coerceIn(0f, 1f) * imageRect.height
+    )
+}
+
+private fun Offset.toBitmapPoint(bitmap: Bitmap): Offset {
+    return Offset(
+        x = x.coerceIn(0f, 1f) * bitmap.width,
+        y = y.coerceIn(0f, 1f) * bitmap.height
+    )
+}
+
+private fun detectCornerDragTarget(
+    touch: Offset,
+    imageRect: Rect,
+    corners: DocumentCorners
+): CornerDragTarget {
+    if (imageRect.width <= 0f || imageRect.height <= 0f) {
+        return CornerDragTarget.NONE
+    }
+
+    val topLeft = corners.topLeft.toScreenOffset(imageRect)
+    val topRight = corners.topRight.toScreenOffset(imageRect)
+    val bottomRight = corners.bottomRight.toScreenOffset(imageRect)
+    val bottomLeft = corners.bottomLeft.toScreenOffset(imageRect)
+
+    val threshold = 110f
+
+    fun near(point: Offset): Boolean {
+        return distance(touch, point) <= threshold
+    }
+
+    return when {
+        near(topLeft) -> CornerDragTarget.TOP_LEFT
+        near(topRight) -> CornerDragTarget.TOP_RIGHT
+        near(bottomRight) -> CornerDragTarget.BOTTOM_RIGHT
+        near(bottomLeft) -> CornerDragTarget.BOTTOM_LEFT
+        isPointInsideQuad(touch, topLeft, topRight, bottomRight, bottomLeft) -> CornerDragTarget.MOVE
+        else -> CornerDragTarget.NONE
+    }
+}
+
+private fun updateDocumentCornersByDrag(
+    corners: DocumentCorners,
+    target: CornerDragTarget,
+    dx: Float,
+    dy: Float
+): DocumentCorners {
+    fun Offset.moved(): Offset {
+        return Offset(
+            x = (x + dx).coerceIn(0f, 1f),
+            y = (y + dy).coerceIn(0f, 1f)
+        )
+    }
+
+    fun Offset.movedBy(deltaX: Float, deltaY: Float): Offset {
+        return Offset(
+            x = (x + deltaX).coerceIn(0f, 1f),
+            y = (y + deltaY).coerceIn(0f, 1f)
+        )
+    }
+
+    return when (target) {
+        CornerDragTarget.TOP_LEFT -> corners.copy(topLeft = corners.topLeft.moved())
+        CornerDragTarget.TOP_RIGHT -> corners.copy(topRight = corners.topRight.moved())
+        CornerDragTarget.BOTTOM_RIGHT -> corners.copy(bottomRight = corners.bottomRight.moved())
+        CornerDragTarget.BOTTOM_LEFT -> corners.copy(bottomLeft = corners.bottomLeft.moved())
+
+        CornerDragTarget.MOVE -> {
+            val all = listOf(
+                corners.topLeft,
+                corners.topRight,
+                corners.bottomRight,
+                corners.bottomLeft
+            )
+
+            val minX = all.minOf { it.x }
+            val maxX = all.maxOf { it.x }
+            val minY = all.minOf { it.y }
+            val maxY = all.maxOf { it.y }
+
+            val safeDx = dx.coerceIn(-minX, 1f - maxX)
+            val safeDy = dy.coerceIn(-minY, 1f - maxY)
+
+            DocumentCorners(
+                topLeft = corners.topLeft.movedBy(safeDx, safeDy),
+                topRight = corners.topRight.movedBy(safeDx, safeDy),
+                bottomRight = corners.bottomRight.movedBy(safeDx, safeDy),
+                bottomLeft = corners.bottomLeft.movedBy(safeDx, safeDy)
+            )
+        }
+
+        CornerDragTarget.NONE -> corners
+    }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCornerHandle(
+    center: Offset
+) {
+    drawCircle(
+        color = Color.Black.copy(alpha = 0.60f),
+        radius = 46f,
+        center = center
+    )
+
+    drawCircle(
+        color = Color.White,
+        radius = 38f,
+        center = center
+    )
+
+    drawCircle(
+        color = Color(0xFF1565C0),
+        radius = 24f,
+        center = center
+    )
+
+    drawCircle(
+        color = Color.White,
+        radius = 7f,
+        center = center
+    )
+}
+
+private fun distance(a: Offset, b: Offset): Float {
+    return hypot(a.x - b.x, a.y - b.y)
+}
+
+private fun isPointInsideQuad(
+    p: Offset,
+    a: Offset,
+    b: Offset,
+    c: Offset,
+    d: Offset
+): Boolean {
+    return isPointInTriangle(p, a, b, c) || isPointInTriangle(p, a, c, d)
+}
+
+private fun isPointInTriangle(
+    p: Offset,
+    a: Offset,
+    b: Offset,
+    c: Offset
+): Boolean {
+    val area = triangleArea(a, b, c)
+    val area1 = triangleArea(p, b, c)
+    val area2 = triangleArea(a, p, c)
+    val area3 = triangleArea(a, b, p)
+
+    return abs(area - (area1 + area2 + area3)) < 1.5f
+}
+
+private fun triangleArea(
+    a: Offset,
+    b: Offset,
+    c: Offset
+): Float {
+    return abs(
+        (a.x * (b.y - c.y) +
+                b.x * (c.y - a.y) +
+                c.x * (a.y - b.y)) / 2f
+    )
 }

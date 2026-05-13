@@ -1092,6 +1092,10 @@ private fun buildFlowingOcrHtml(
     val totalRows = ((imageHeightPx / lineStepPx) + 10).toInt().coerceAtLeast(sorted.size + 2)
     val rowMap = linkedMapOf<Int, StringBuilder>()
 
+    var lastAssignedRow = -1
+    var lastTopPx = Int.MIN_VALUE
+    val minRowAdvanceTopDeltaPx = (medianHeightPx * 0.32f).toInt().coerceAtLeast(2)
+
     sorted.forEach { line ->
         val rowText = line.text
             .replace("\r\n", "\n")
@@ -1101,9 +1105,17 @@ private fun buildFlowingOcrHtml(
             .trim()
         if (rowText.isBlank()) return@forEach
 
-        val rowIndex = (((line.topPx - topAnchor).coerceAtLeast(0)) / lineStepPx)
+        val rawRowIndex = (((line.topPx - topAnchor).coerceAtLeast(0)) / lineStepPx)
             .toInt()
             .coerceIn(0, totalRows)
+        val isClearlyLowerLine = lastTopPx != Int.MIN_VALUE &&
+                line.topPx >= lastTopPx + minRowAdvanceTopDeltaPx
+        val rowIndex = when {
+            lastAssignedRow < 0 -> rawRowIndex
+            rawRowIndex > lastAssignedRow -> rawRowIndex
+            isClearlyLowerLine -> (lastAssignedRow + 1).coerceAtMost(totalRows)
+            else -> lastAssignedRow
+        }
         val columnIndex = (((line.leftPx - leftAnchor).coerceAtLeast(0)) / charWidthPx)
             .toInt()
             .coerceAtLeast(0)
@@ -1113,6 +1125,9 @@ private fun buildFlowingOcrHtml(
 
         if (target.isNotEmpty() && !target.last().isWhitespace()) target.append(' ')
         target.append(rowText)
+
+        lastAssignedRow = rowIndex
+        if (line.topPx > lastTopPx) lastTopPx = line.topPx
     }
 
     val orderedRows = buildList {

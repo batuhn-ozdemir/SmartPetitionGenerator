@@ -60,14 +60,25 @@ public class DocumentOcrService {
                 Return ONLY one JSON object.
 
                 Goal:
-                Extract readable text lines from the main page/document in the image with their original pixel coordinates.
+                - Extract readable text lines from the entire uploaded document image.
+                - The uploaded image itself is the final page area.
+                - Return coordinates in the uploaded image pixel coordinate system.
 
                 Requirements:
-                - Detect the main page/document area first.
+                - The uploaded image is already the final selected document crop sent by the mobile app.
+                - Treat the ENTIRE uploaded image as one full A4-like page/document area.
+                - Do NOT search for another paper boundary inside the image.
+                - Do NOT crop, rotate, deskew, reframe, or remove margins again.
+                - Use the uploaded image coordinate system directly: top-left of the uploaded image is (0,0).
+                - Coordinates must be relative to the uploaded image, not to any internally detected sub-page.
+                - If the document still has slight perspective distortion, still extract lines using the uploaded image coordinate system.
+                - Never crop out the top margin during analysis; headings/title block at the very top are mandatory.
                 - Extract every readable text line that belongs to the page.
                 - Keep the line text exactly as seen. Do not paraphrase.
                 - Do not merge far apart lines.
-                - Ignore logos, icons, seals, decorative lines, pure signature scribbles, and background clutter.
+                - Ignore non-text logos, icons, seals, decorative lines, pure signature scribbles, and background clutter.
+                - If readable text exists near/inside a header-logo-seal area, extract the text.
+                - Do not skip institution names, title/header lines, subject lines, dates, or top-margin text.
                 - Keep handwritten words only if they are clearly readable.
                 - Coordinates must be in ORIGINAL image pixel coordinates.
                 - Sort lines in reading order: top-to-bottom, then left-to-right.
@@ -79,6 +90,8 @@ public class DocumentOcrService {
                 - Never invent extra dots/underscores that are not visible.
                 - Keep each fillable field on its own original line.
                 - Do not treat dotted fill-in blanks as decorative lines.
+                - Preserve header lines (e.g., institution name, subject line, date, petition title) even if they are near image borders.
+                                - Output topPx/leftPx using the same coordinate origin for all lines so header/body ordering stays stable.
 
                 Output JSON schema:
                 {
@@ -200,10 +213,10 @@ public class DocumentOcrService {
                 }
 
                 OcrLayoutResponse parsed = parseOcrLayoutFromModelText(aiRaw);
-                if (parsed != null) {
-                    normalizeLineTexts(parsed);
-                    return parsed;
-                }
+//                if (parsed != null) {
+//                    normalizeLineTexts(parsed);
+//                    return parsed;
+//                }
 
                 if (parsed == null) {
                     System.out.println("OCR RAW RESPONSE:\n" + aiRaw);
@@ -213,6 +226,7 @@ public class DocumentOcrService {
                     continue;
                 }
 
+                normalizeLineTexts(parsed);
                 normalizeResponse(parsed);
 
                 if (!parsed.isSuccess()) {
@@ -445,10 +459,13 @@ public class DocumentOcrService {
                     return line;
                 })
                 .filter(line -> !line.getText().isBlank())
-                .sorted(Comparator
-                        .comparingInt(OcrLayoutResponse.OcrLine::getTopPx)
-                        .thenComparingInt(OcrLayoutResponse.OcrLine::getLeftPx))
+//                .sorted(Comparator
+//                        .comparingInt(OcrLayoutResponse.OcrLine::getTopPx)
+//                        .thenComparingInt(OcrLayoutResponse.OcrLine::getLeftPx))
                 .collect(Collectors.toList());
+
+        cleaned.sort(createStableReadingOrderComparator(cleaned));
+        normalizeNonParagraphLineIndents(cleaned);
 
         response.setLines(cleaned);
 
@@ -466,6 +483,105 @@ public class DocumentOcrService {
             response.setErrorMessage(null);
         }
     }
+
+    private void normalizeNonParagraphLineIndents(List<OcrLayoutResponse.OcrLine> lines) {
+        if (lines == null || lines.isEmpty()) return;
+
+        int baseLeft = lines.stream()
+                .mapToInt(OcrLayoutResponse.OcrLine::getLeftPx)
+                .sorted()
+                .skip(Math.max(0, lines.size() / 5))
+                .findFirst()
+                .orElse(0);
+
+        int medianHeight = estimateMedianLineHeight(lines);
+        int indentTolerancePx = Math.max(8, medianHeight / 2);
+        int paragraphIndentMinPx = Math.max(20, (int) Math.round(medianHeight * 1.2));
+
+        for (int i = 0; i < lines.size(); i++) {
+            OcrLayoutResponse.OcrLine line = lines.get(i);
+            if (line == null) continue;
+
+            if (line.getLeftPx() <= baseLeft + indentTolerancePx) {
+                line.setLeftPx(baseLeft);
+                continue;
+            }
+
+            if (isHeadingOrParagraphStart(lines, i, baseLeft, paragraphIndentMinPx, medianHeight)) {
+                continue;
+            }
+
+            line.setLeftPx(baseLeft);
+        }
+    }
+
+    private boolean isHeadingOrParagraphStart(List<OcrLayoutResponse.OcrLine> lines,
+                                              int index,
+                                              int baseLeft,
+                                              int paragraphIndentMinPx,
+                                              int medianHeight) {
+        OcrLayoutResponse.OcrLine current = lines.get(index);
+        if (current == null) return false;
+
+        String text = current.getText() == null ? "" : current.getText().trim();
+        int indentPx = current.getLeftPx() - baseLeft;
+        if (indentPx < paragraphIndentMinPx) return false;
+
+        if (index == 0) {
+            return true;
+        }
+
+        OcrLayoutResponse.OcrLine prev = lines.get(index - 1);
+        if (prev == null) return false;
+
+        int verticalGap = current.getTopPx() - (prev.getTopPx() + prev.getHeightPx());
+        int paragraphGapThreshold = Math.max(10, medianHeight / 2);
+
+        if (verticalGap >= paragraphGapThreshold) {
+            return true;
+        }
+
+        return text.endsWith(":") || text.equals(text.toUpperCase());
+    }
+
+    private Comparator<OcrLayoutResponse.OcrLine> createStableReadingOrderComparator(List<OcrLayoutResponse.OcrLine> lines) {
+        int medianHeight = estimateMedianLineHeight(lines);
+        int sameRowTolerancePx = Math.max(6, medianHeight / 2);
+
+        return (a, b) -> {
+            int aCenterY = a.getTopPx() + (a.getHeightPx() / 2);
+            int bCenterY = b.getTopPx() + (b.getHeightPx() / 2);
+            int deltaY = aCenterY - bCenterY;
+
+            if (Math.abs(deltaY) <= sameRowTolerancePx) {
+                int leftCompare = Integer.compare(a.getLeftPx(), b.getLeftPx());
+                if (leftCompare != 0) return leftCompare;
+            }
+
+            int topCompare = Integer.compare(a.getTopPx(), b.getTopPx());
+            if (topCompare != 0) return topCompare;
+
+            return Integer.compare(a.getLeftPx(), b.getLeftPx());
+        };
+    }
+
+    private int estimateMedianLineHeight(List<OcrLayoutResponse.OcrLine> lines) {
+        if (lines == null || lines.isEmpty()) return 12;
+
+        List<Integer> heights = lines.stream()
+                .map(OcrLayoutResponse.OcrLine::getHeightPx)
+                .filter(h -> h > 0)
+                .sorted()
+                .collect(Collectors.toList());
+
+        if (heights.isEmpty()) return 12;
+        int mid = heights.size() / 2;
+        if (heights.size() % 2 == 0) {
+            return (heights.get(mid - 1) + heights.get(mid)) / 2;
+        }
+        return heights.get(mid);
+    }
+
 
     private void sleepQuietly(long delayMs) {
         if (delayMs <= 0) return;

@@ -9,6 +9,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
@@ -93,6 +94,8 @@ fun CreatePetitionScreen(
             }
         }
     }
+
+    KeepScreenAwake(aiState is AiState.Loading)
 
     Scaffold { padding ->
         Column(modifier = Modifier.padding(padding).padding(16.dp)) {
@@ -312,6 +315,17 @@ fun CreatePetitionScreen(
 
                 }
             }
+        }
+    }
+}
+@Composable
+private fun KeepScreenAwake(enabled: Boolean) {
+    val view = LocalView.current
+    DisposableEffect(view, enabled) {
+        val previous = view.keepScreenOn
+        if (enabled) view.keepScreenOn = true
+        onDispose {
+            view.keepScreenOn = previous
         }
     }
 }

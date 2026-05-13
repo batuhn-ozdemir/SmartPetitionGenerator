@@ -637,27 +637,10 @@ fun PreviewScreen(
                     const sel = window.getSelection && window.getSelection();
                     if (!sel || sel.rangeCount === 0) return;
 
-                    const range = sel.getRangeAt(0);
-                    const startNode = range.startContainer;
-                    let block = startNode && startNode.nodeType === 1 ? startNode : (startNode ? startNode.parentElement : null);
-
-                    while (block && block !== document.body) {
-                        const tag = (block.tagName || '').toUpperCase();
-                        if (['P', 'DIV', 'LI', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(tag)) {
-                            break;
-                        }
-                        block = block.parentElement;
+                    const inserted = document.execCommand('insertText', false, '\t');
+                    if (!inserted) {
+                        document.execCommand('insertHTML', false, '&nbsp;&nbsp;&nbsp;&nbsp;');
                     }
-
-                    if (!block || block === document.body) {
-                        block = startNode && startNode.nodeType === 1 ? startNode : (startNode ? startNode.parentElement : null);
-                    }
-
-                    if (!block) return;
-
-                    const currentIndent = parseFloat(block.style.textIndent || '0');
-                    const nextIndent = (!isFinite(currentIndent) || currentIndent <= 0) ? 2 : (currentIndent + 1);
-                    block.style.textIndent = nextIndent + 'em';
 
                     if (window.AndroidEditBridge && window.AndroidEditBridge.onContentChanged) {
                         window.AndroidEditBridge.onContentChanged();
