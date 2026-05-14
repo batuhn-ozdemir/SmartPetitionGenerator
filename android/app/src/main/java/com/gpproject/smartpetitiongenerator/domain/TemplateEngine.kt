@@ -2,6 +2,7 @@ package com.gpproject.smartpetitiongenerator.domain
 
 object TemplateEngine {
 
+    // Shared CSS used to render petition content as an A4 document.
     private const val CSS_STYLE = """
         <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -17,13 +18,13 @@ object TemplateEngine {
             padding: 16px;
         }
 
-        /* A4 gerçek ölçü */
+        /* Real A4 page size */
         .a4-page {
             width: 210mm !important;
             height: 297mm !important;
             background: #fff;
             color: #000;
-            padding: 25mm !important; /* Tüm akışlarda aynı kenar boşluğu */
+            padding: 25mm !important;
             box-shadow: 0 4px 14px rgba(0,0,0,0.45);
             display: flex;
             flex-direction: column;
@@ -35,7 +36,7 @@ object TemplateEngine {
             text-align: justify;
         }
         
-        /* Tüm alt elemanlar üst kapsayıcıdan aynı tipografiyi miras alsın */
+        /* Keep typography consistent inside the A4 page */
         .a4-page * {
             font-family: inherit;
             font-size: inherit;
@@ -73,7 +74,7 @@ object TemplateEngine {
         }
 
         .footer-wrapper {
-            margin-top: 2.2em; /* dilekçe bitiminden yaklaşık 2 satır sonra */
+            margin-top: 2.2em;
             padding-top: 0;
         }
 
@@ -103,7 +104,7 @@ object TemplateEngine {
         .clear { clear: both; }
 
         .attachments-left {
-            margin-top: 1.6em; /* adres bloğundan sonra 1 satır boşluk */
+            margin-top: 1.6em;
         }
 
         .attachments-left .contact-footer {
@@ -113,7 +114,7 @@ object TemplateEngine {
             text-align: left;
         }
 
-        /* PRINT: Önizleme ile birebir aynı olsun */
+        /* Print/PDF settings should match the preview layout */
         @page {
             size: A4;
             margin: 0;
@@ -126,6 +127,7 @@ object TemplateEngine {
                 margin: 0 !important;
                 display: block !important;
             }
+
             .a4-page {
                 box-shadow: none !important;
                 width: 210mm !important;
@@ -137,12 +139,19 @@ object TemplateEngine {
         </style>
     """
 
+    // Wraps raw petition HTML inside a complete A4 HTML document.
     fun wrapContentInA4(rawHtmlContent: String): String {
+        // Avoid wrapping the content twice if it already contains an A4 container.
         val hasA4 = rawHtmlContent.contains("class='a4-page'") ||
                 rawHtmlContent.contains("class=\"a4-page\"")
 
-        val bodyContent = if (hasA4) rawHtmlContent else "<div class=\"a4-page\">$rawHtmlContent</div>"
+        val bodyContent = if (hasA4) {
+            rawHtmlContent
+        } else {
+            "<div class=\"a4-page\">$rawHtmlContent</div>"
+        }
 
+        // Return a full HTML document that can be rendered in WebView or converted to PDF.
         return """
             <!DOCTYPE html>
             <html>

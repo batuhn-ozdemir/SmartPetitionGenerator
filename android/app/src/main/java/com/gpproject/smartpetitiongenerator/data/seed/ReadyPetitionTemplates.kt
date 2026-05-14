@@ -1,4 +1,4 @@
-package com.gpproject.smartpetitiongenerator.domain
+package com.gpproject.smartpetitiongenerator.data.seed
 
 import com.gpproject.smartpetitiongenerator.data.remote.InputField
 

@@ -8,8 +8,15 @@ data class UserProfile(
     @PrimaryKey(autoGenerate = true)
     val id: Int = 1,
 
-    val fullName: String,       // Ad Soyad
-    val identityNumber: String, // T.C. Kimlik No
-    val phoneNumber: String,    // Telefon
-    val address: String,        // Adres
+    // Full name of the user.
+    val fullName: String,
+
+    // National identity number of the user.
+    val identityNumber: String,
+
+    // Contact phone number.
+    val phoneNumber: String,
+
+    // Address used in generated petitions.
+    val address: String,
 )
