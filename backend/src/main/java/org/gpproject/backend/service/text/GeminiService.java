@@ -1,4 +1,4 @@
-package org.gpproject.backend.service;
+package org.gpproject.backend.service.text;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -18,21 +18,30 @@ import java.util.regex.Pattern;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+// This service calls Gemini for Turkish petition generation.
+// It supports two modes:
+// 1. Draft mode: returns templateHtml, givenParams, and requiredParams as JSON.
+// 2. Final mode: returns the final HTML petition.
+
 @Service
 public class GeminiService {
 
-    private static final Map<String, String> INSTITUTION_ABBREVIATIONS = createInstitutionAbbreviationMap();
-
+    // Comma-separated Gemini API keys loaded from application.properties.
     @Value("#{'${gemini.api.keys}'.split(',')}")
     private List<String> apiKeys;
 
+    // Used to rotate API keys across requests.
     private final AtomicInteger currentKeyIndex = new AtomicInteger(0);
 
+    // Gemini generateContent endpoint template.
     private static final String GEMINI_URL_TEMPLATE =
             "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent";
 
+    // Text generation model used for petition drafting and final HTML generation.
     private static final String TEXT_MODEL = "gemini-2.5-flash";
 
+    // HTTP client used for Gemini requests.
+    // Read timeout is longer because AI generation can take time.
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(90, TimeUnit.SECONDS)
@@ -41,6 +50,7 @@ public class GeminiService {
 
     private final Gson gson = new Gson();
 
+    // Returns valid API keys after removing empty or placeholder values.
     private List<String> normalizedApiKeys() {
         List<String> keys = new ArrayList<>();
 
@@ -60,25 +70,36 @@ public class GeminiService {
         return keys;
     }
 
+    // Returns the next API key using round-robin rotation.
     private String getNextApiKey(List<String> keys) {
         int index = currentKeyIndex.getAndUpdate(i -> (i + 1) % keys.size());
         return keys.get(index);
     }
 
+    // Calls Gemini and returns either:
+    // - Draft JSON in normal mode
+    // - Final HTML in FINAL_BUILD mode
+    // - Error JSON if generation fails or the request is rejected
     public String callGemini(String userText) {
+
+        // Current date is inserted into the petition prompt using Turkey timezone.
         String currentDate = LocalDate.now(ZoneId.of("Europe/Istanbul"))
                 .format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
 
+        // FINAL_BUILD mode means the client already collected form fields
+        // and now expects final HTML instead of draft JSON.
         boolean isFinal = userText != null && userText.trim().startsWith("FINAL_BUILD:");
 
+        // Main instruction block that controls petition style, safety rules,
+        // required output format, draft mode, and final HTML mode.
         String systemInstruction = """
             You are an intelligent Turkish legal petition architect. 
             Today's date is %s.
 
             --- 1. BANNED PARAMS (DO NOT ASK FOR THESE) ---
-            The system ALREADY has the user's personal profile.
-            NEVER put these in `requiredParams`: AD_SOYAD, TCKN, TELEFON, ADRES, E-POSTA, SINIF, OGRENCI_NO, IMZA.
-            Ask ONLY for context-specific missing data (normally 2-4 fields).
+            NEVER put these in `requiredParams`: AD_SOYAD, TCKN, TELEFON, ADRES, IMZA.
+            The system already has these profile fields.
+            You may ask for context-specific fields such as OGRENCI_NO, SINIF, BOLUM, DERS_ADI, FAKULTE, E_POSTA only if they are necessary for the petition.
                 
           --- 2. PETITION WRITING RULES (MANDATORY) ---
           Follow formal Turkish petition conventions:
@@ -156,12 +177,14 @@ public class GeminiService {
             
             --- MODE 2: FINAL (STARTS WITH 'FINAL_BUILD:') ---
             Return ONLY STRICT HTML using the structure above. Integrate the user's data fluidly.
-            """.formatted(currentDate, currentDate);
+        """.formatted(currentDate, currentDate);
 
+        // Builds the Gemini request JSON body.
         String jsonBody = buildGeminiTextRequestBody(systemInstruction, userText, isFinal);
 
         List<String> keys = normalizedApiKeys();
 
+        // If no valid API key exists, return a safe error JSON for the Android client.
         if (keys.isEmpty()) {
             return generateErrorJson("Gemini API anahtarı tanımlı değil.");
         }
@@ -171,6 +194,8 @@ public class GeminiService {
 
         String lastError = "Sunucu Hatası: Tüm denemeler başarısız oldu.";
 
+        // Try multiple times to handle rate limits, temporary server errors,
+        // and multiple API keys.
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             String currentKey = getNextApiKey(keys);
             String fullUrl = GEMINI_URL_TEMPLATE.formatted(TEXT_MODEL) + "?key=" + currentKey;
@@ -184,6 +209,8 @@ public class GeminiService {
                 int code = response.code();
                 String responseBody = response.body() != null ? response.body().string() : "";
 
+                // Handle Gemini HTTP errors such as rate limit, server errors,
+                // invalid key, or model errors.
                 if (!response.isSuccessful()) {
                     String providerError = extractProviderErrorMessage(responseBody);
 
@@ -213,6 +240,7 @@ public class GeminiService {
                     continue;
                 }
 
+                // Extract the model text from the Gemini response envelope.
                 String aiRawText = extractModelText(responseBody);
 
                 if (aiRawText == null || aiRawText.isBlank()) {
@@ -240,6 +268,8 @@ public class GeminiService {
                         .replace("```", "")
                         .trim();
 
+                // Convert model-level safety or out-of-scope rejections
+                // into a normal error JSON that the Android client can display.
                 if (cleanText.trim().equals("REJECT_SECURITY")) {
                     return generateErrorJson("Güvenlik Reddi: Lütfen sadece resmi yazışma konuları giriniz.");
                 }
@@ -250,6 +280,7 @@ public class GeminiService {
 
                 cleanText = extractJsonIfAny(cleanText);
 
+                // In draft mode, normalize the generated JSON before returning it.
                 if (!isFinal && cleanText.startsWith("{")) {
                     return normalizeDraftJson(cleanText, currentDate, userText);
                 }
@@ -258,6 +289,7 @@ public class GeminiService {
                     return cleanText;
                 }
 
+                // In final mode, the model should return strict HTML.
                 if (cleanText.contains("<div") || cleanText.contains("<p>")) {
                     return cleanText;
                 }
@@ -284,6 +316,8 @@ public class GeminiService {
         return generateErrorJson(lastError);
     }
 
+    // Builds Gemini's generateContent request body.
+    // Draft mode enables JSON response MIME type, final mode expects HTML text.
     private String buildGeminiTextRequestBody(String systemInstructionText, String userText, boolean isFinal) {
         JsonObject root = new JsonObject();
 
@@ -330,6 +364,7 @@ public class GeminiService {
         return gson.toJson(root);
     }
 
+    // Extracts candidates[0].content.parts[0].text from Gemini response JSON.
     private String extractModelText(String responseBody) {
         try {
             JsonObject root = JsonParser.parseString(responseBody).getAsJsonObject();
@@ -375,6 +410,7 @@ public class GeminiService {
         }
     }
 
+    // Extracts finishReason when Gemini returns no text.
     private String extractFinishReason(String responseBody) {
         try {
             JsonObject root = JsonParser.parseString(responseBody).getAsJsonObject();
@@ -401,6 +437,7 @@ public class GeminiService {
         return "";
     }
 
+    // Determines how long to wait before retrying after a rate-limit response.
     private long parseRetryDelayMs(Response response, String providerError, long fallbackMs) {
         String retryHeader = response.header("Retry-After");
 
@@ -447,6 +484,7 @@ public class GeminiService {
         return t;
     }
 
+    // Extracts a readable error message from Gemini provider error responses.
     private String extractProviderErrorMessage(String responseBody) {
         if (responseBody == null || responseBody.isBlank()) return "";
         try {
@@ -462,6 +500,8 @@ public class GeminiService {
         return "";
     }
 
+    // Cleans and fixes draft JSON returned by Gemini.
+    // It guarantees templateHtml, givenParams, and requiredParams fields.
     private String normalizeDraftJson(String json, String currentDate, String userText) {
         try {
             JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
@@ -504,7 +544,7 @@ public class GeminiService {
                     if (key.isEmpty()) continue;
 
                     // Yasaklı olanları forma dahil etme
-                    if (key.equals("AD_SOYAD") || key.equals("TCKN") || key.equals("TELEFON") || key.equals("ADRES")) continue;
+                    if (isProfileProvidedKey(key)) continue;
 
                     field.addProperty("key", key);
                     if (!field.has("label") || field.get("label").isJsonNull()) field.addProperty("label", key);
@@ -528,6 +568,7 @@ public class GeminiService {
         }
     }
 
+    // Ensures institution-related fields are always available in the form.
     private void ensureInstitutionLabels(JsonObject obj) {
         if (!obj.has("requiredParams") || !obj.get("requiredParams").isJsonArray()) return;
 
@@ -536,6 +577,7 @@ public class GeminiService {
         ensureRequiredField(required, "MAKAMIN_ADI", "Makam / Kurum", "text");
     }
 
+    // Adds attachment-related form fields only when the user request likely needs attachments.
     private void ensureAttachmentFields(JsonObject obj, String userText) {
         if (!obj.has("requiredParams") || !obj.get("requiredParams").isJsonArray()) return;
 
@@ -546,6 +588,7 @@ public class GeminiService {
         }
     }
 
+    // Removes unsafe, invented, empty, or placeholder-like values from givenParams.
     private void sanitizeGivenParams(JsonObject obj, String userText) {
         JsonObject source = obj.getAsJsonObject("givenParams");
         JsonObject cleaned = new JsonObject();
@@ -560,7 +603,7 @@ public class GeminiService {
             if (value.isBlank() || looksLikePlaceholder(value)) continue;
             if (!shouldKeepGivenValue(key, value, userText)) continue;
 
-            cleaned.addProperty(key, maybeExpandInstitutionValue(key, value));
+            cleaned.addProperty(key, value);
         }
 
         enrichGivenParamsFromPrompt(cleaned, userText);
@@ -568,6 +611,7 @@ public class GeminiService {
         obj.add("givenParams", cleaned);
     }
 
+    // Extracts explicit key-value pairs from the user's prompt and adds them to givenParams.
     private void enrichGivenParamsFromPrompt(JsonObject cleaned, String userText) {
         if (userText == null || userText.isBlank()) return;
 
@@ -578,18 +622,9 @@ public class GeminiService {
 
             if (looksLikePlaceholder(rawValue)) continue;
             String dynamicKey = sanitizeKey(rawLabelToKey(rawLabel));
-            if (dynamicKey.isBlank() || isBannedKey(dynamicKey)) continue;
+            if (dynamicKey.isBlank() || isProfileProvidedKey(dynamicKey)) continue;
 
-            cleaned.addProperty(dynamicKey, maybeExpandInstitutionValue(dynamicKey, rawValue));
-        }
-
-        if (cleaned.has("KURUM_ADI")) {
-            String kurum = cleaned.get("KURUM_ADI").getAsString();
-            cleaned.addProperty("KURUM_ADI", maybeExpandInstitutionValue("KURUM_ADI", kurum));
-        }
-        if (cleaned.has("MAKAMIN_ADI")) {
-            String makam = cleaned.get("MAKAMIN_ADI").getAsString();
-            cleaned.addProperty("MAKAMIN_ADI", maybeExpandInstitutionValue("MAKAMIN_ADI", makam));
+            cleaned.addProperty(dynamicKey, rawValue);
         }
     }
 
@@ -610,34 +645,6 @@ public class GeminiService {
                 .replaceAll("[^A-Z0-9 ]", " ")
                 .replaceAll("\\s+", "_")
                 .trim();
-    }
-
-    private String maybeExpandInstitutionValue(String key, String value) {
-        if (value == null || value.isBlank()) return value;
-        if (!("KURUM_ADI".equals(key) || "MAKAMIN_ADI".equals(key))) return value;
-
-        String normalized = normalizeForMatch(value);
-        if (INSTITUTION_ABBREVIATIONS.containsKey(normalized)) {
-            return INSTITUTION_ABBREVIATIONS.get(normalized);
-        }
-
-        return value;
-    }
-
-    private static Map<String, String> createInstitutionAbbreviationMap() {
-        Map<String, String> map = new HashMap<>();
-        map.put("meb", "T.C. Millî Eğitim Bakanlığı");
-        map.put("sgk", "Sosyal Güvenlik Kurumu Başkanlığı");
-        map.put("yok", "Yükseköğretim Kurulu Başkanlığı");
-        map.put("ytu", "Yıldız Teknik Üniversitesi Rektörlüğü");
-        map.put("itu", "İstanbul Teknik Üniversitesi Rektörlüğü");
-        map.put("odtu", "Orta Doğu Teknik Üniversitesi Rektörlüğü");
-        map.put("deu", "Dokuz Eylül Üniversitesi Rektörlüğü");
-        map.put("au", "Ankara Üniversitesi Rektörlüğü");
-        map.put("fbe", "Fen Bilimleri Enstitüsü Müdürlüğü");
-        map.put("sbe", "Sosyal Bilimler Enstitüsü Müdürlüğü");
-        map.put("saglik bakanligi", "T.C. Sağlık Bakanlığı");
-        return map;
     }
 
     private boolean valueMentionedInPrompt(String value, String userText) {
@@ -666,6 +673,7 @@ public class GeminiService {
                 .trim();
     }
 
+    // Detects whether the user request likely requires attachment fields.
     private boolean needsAttachmentInput(String userText) {
         if (userText == null || userText.isBlank()) return false;
         String t = normalizeForMatch(userText);
@@ -687,9 +695,12 @@ public class GeminiService {
 
     }
 
-    private boolean isBannedKey(String key) {
-        return key.equals("AD_SOYAD") || key.equals("TCKN") || key.equals("TELEFON") || key.equals("ADRES")
-                || key.equals("E_POSTA") || key.equals("SINIF") || key.equals("OGRENCI_NO") || key.equals("IMZA");
+    private boolean isProfileProvidedKey(String key) {
+        return key.equals("AD_SOYAD")
+                || key.equals("TCKN")
+                || key.equals("TELEFON")
+                || key.equals("ADRES")
+                || key.equals("IMZA");
     }
 
     private void ensureRequiredField(JsonArray required, String key, String label, String type) {
@@ -714,6 +725,7 @@ public class GeminiService {
         return key.replace(' ', '_');
     }
 
+    // Returns an error response in the same JSON structure expected by Android.
     private String generateErrorJson(String msg) {
         String normalized = normalizeErrorMessage(msg);
         String safeMsg = htmlEscape(safeText(normalized));

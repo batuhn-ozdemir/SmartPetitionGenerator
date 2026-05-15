@@ -54,7 +54,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-//import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -81,21 +80,26 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+// Android and CameraX imports are used for image picking, camera capture,
+// bitmap processing, EXIF orientation handling, and CameraX preview.
+
 private enum class ScanStep {
-    START,
-    CAMERA,
-    CROP
+    START,  // Initial screen where the user selects or captures an image.
+    CAMERA, // Camera preview screen.
+    CROP    // Corner selection and perspective correction screen.
 }
 
 private enum class CornerDragTarget {
-    NONE,
-    TOP_LEFT,
-    TOP_RIGHT,
-    BOTTOM_RIGHT,
-    BOTTOM_LEFT,
-    MOVE
+    NONE,         // No draggable target selected.
+    TOP_LEFT,     // Top-left corner handle.
+    TOP_RIGHT,    // Top-right corner handle.
+    BOTTOM_RIGHT, // Bottom-right corner handle.
+    BOTTOM_LEFT,  // Bottom-left corner handle.
+    MOVE          // Whole selected quadrilateral is moved.
 }
 
+// Holds normalized document corner coordinates.
+// Each Offset uses values between 0f and 1f relative to the image size.
 private data class DocumentCorners(
     val topLeft: Offset,
     val topRight: Offset,
@@ -111,16 +115,23 @@ fun ScanToPreviewScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // Current scan flow step.
     var step by remember { mutableStateOf(ScanStep.START) }
+
+    // Original selected or captured image.
     var sourceBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    // Current document corner selection.
     var corners by remember { mutableStateOf(defaultDocumentCorners()) }
 
+    // Processing and status UI states.
     var isProcessing by remember { mutableStateOf(false) }
     var statusText by remember {
         mutableStateOf("Fotoğraf çekin veya galeriden seçin. OCR'a gitmeden önce 4 köşe seçilecek.")
     }
     var warningText by remember { mutableStateOf<String?>(null) }
 
+    // Opens Android photo picker and receives the selected image URI.
     val pickImageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -132,6 +143,7 @@ fun ScanToPreviewScreen(
             return@rememberLauncherForActivityResult
         }
 
+        // Decode the selected image and respect EXIF orientation.
         val bitmap = decodeBitmapFullRespectingOrientation(
             context = context,
             imageUri = uri
@@ -149,6 +161,7 @@ fun ScanToPreviewScreen(
         statusText = "Görsel seçildi. Belgenin 4 köşesini sürükleyerek seçin."
     }
 
+    // Requests camera permission before opening the camera screen.
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -161,6 +174,7 @@ fun ScanToPreviewScreen(
         }
     }
 
+    // Keeps the screen awake while OCR/image processing is running.
     KeepScreenAwake(isProcessing)
 
     when (step) {
@@ -195,6 +209,7 @@ fun ScanToPreviewScreen(
                     viewModel.clearCurrentPreview()
                     warningText = null
 
+                    // Decode captured camera image and apply EXIF rotation.
                     val bitmap = decodeBitmapFullRespectingOrientation(file)
 
                     if (bitmap == null) {
@@ -253,6 +268,8 @@ fun ScanToPreviewScreen(
                         warningText = null
                         statusText = "Seçilen dörtgen düzeltilip PNG olarak AI'ye gönderiliyor..."
 
+                        // Perspective correction and PNG conversion are CPU-heavy,
+                        // so they run on Dispatchers.Default.
                         val result = runCatching {
                             withContext(Dispatchers.Default) {
                                 val correctedBitmap = perspectiveCorrectBitmap(
@@ -299,6 +316,7 @@ fun ScanToPreviewScreen(
     }
 }
 
+// Initial screen that lets the user either pick an image or open the camera.
 @Composable
 private fun StartStepContent(
     statusText: String,
@@ -350,6 +368,7 @@ private fun StartStepContent(
     }
 }
 
+// Screen where the user adjusts the four document corners before OCR.
 @Composable
 private fun CropStepContent(
     bitmap: Bitmap,
@@ -438,6 +457,7 @@ private fun CropStepContent(
     }
 }
 
+// Displays the selected image and lets the user drag document corner handles.
 @Composable
 private fun DocumentCornerPicker(
     bitmap: Bitmap,
@@ -553,19 +573,10 @@ private fun DocumentCornerPicker(
             drawCornerHandle(p3)
             drawCornerHandle(p4)
         }
-
-//        Text(
-//            text = "1 sol üst • 2 sağ üst • 3 sağ alt • 4 sol alt",
-//            color = Color.White,
-//            modifier = Modifier
-//                .align(Alignment.TopCenter)
-//                .padding(top = 12.dp)
-//                .background(Color.Black.copy(alpha = 0.55f), MaterialTheme.shapes.small)
-//                .padding(horizontal = 10.dp, vertical = 6.dp)
-//        )
     }
 }
 
+// CameraX screen used to capture a document photo.
 @Composable
 private fun CameraCaptureStep(
     onCaptured: (File) -> Unit,
@@ -703,46 +714,7 @@ private fun CameraCaptureStep(
     }
 }
 
-@Composable
-private fun CameraCornerGuideOverlay(
-    modifier: Modifier = Modifier
-) {
-    Canvas(modifier = modifier) {
-        val marginX = size.width * 0.08f
-        val marginY = size.height * 0.12f
-
-        val left = marginX
-        val top = marginY
-        val right = size.width - marginX
-        val bottom = size.height - marginY
-
-        val cornerLength = 80f
-        val stroke = 8f
-        val color = Color.White
-
-        fun drawCorner(x: Float, y: Float, dirX: Float, dirY: Float) {
-            drawLine(
-                color = color,
-                start = Offset(x, y),
-                end = Offset(x + dirX * cornerLength, y),
-                strokeWidth = stroke
-            )
-
-            drawLine(
-                color = color,
-                start = Offset(x, y),
-                end = Offset(x, y + dirY * cornerLength),
-                strokeWidth = stroke
-            )
-        }
-
-        drawCorner(left, top, 1f, 1f)
-        drawCorner(right, top, -1f, 1f)
-        drawCorner(left, bottom, 1f, -1f)
-        drawCorner(right, bottom, -1f, -1f)
-    }
-}
-
+// Keeps the device screen on while long image processing or OCR operations are running.
 @Composable
 private fun KeepScreenAwake(enabled: Boolean) {
     val view = LocalView.current
@@ -755,6 +727,7 @@ private fun KeepScreenAwake(enabled: Boolean) {
     }
 }
 
+// Returns the default corner positions as normalized coordinates.
 private fun defaultDocumentCorners(): DocumentCorners {
     return DocumentCorners(
         topLeft = Offset(0.08f, 0.08f),
@@ -764,6 +737,7 @@ private fun defaultDocumentCorners(): DocumentCorners {
     )
 }
 
+// Decodes an image URI into a Bitmap and applies EXIF orientation correction.
 private fun decodeBitmapFullRespectingOrientation(
     context: Context,
     imageUri: Uri
@@ -792,6 +766,7 @@ private fun decodeBitmapFullRespectingOrientation(
     }.getOrNull()
 }
 
+// Decodes an image URI into a Bitmap and applies EXIF orientation correction.
 private fun decodeBitmapFullRespectingOrientation(file: File): Bitmap? {
     return runCatching {
         val sourceBytes = file.readBytes()
@@ -814,6 +789,7 @@ private fun decodeBitmapFullRespectingOrientation(file: File): Bitmap? {
     }.getOrNull()
 }
 
+// Reads EXIF orientation from an image URI or byte array.
 private fun resolveExifOrientation(
     context: Context,
     imageUri: Uri?,
@@ -842,6 +818,7 @@ private fun resolveExifOrientation(
     }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
 }
 
+// Rotates or flips the bitmap according to its EXIF orientation.
 private fun Bitmap.rotateByExifOrientation(orientation: Int): Bitmap {
     val matrix = Matrix()
 
@@ -880,6 +857,7 @@ private fun Bitmap.rotateByExifOrientation(orientation: Int): Bitmap {
     }
 }
 
+// Applies perspective correction using the selected four document corners.
 private fun perspectiveCorrectBitmap(
     source: Bitmap,
     corners: DocumentCorners
@@ -931,6 +909,7 @@ private fun perspectiveCorrectBitmap(
     return outputBitmap
 }
 
+// Converts a Bitmap into PNG bytes without quality loss.
 private fun bitmapToLosslessPngBytes(bitmap: Bitmap): ByteArray {
     val output = ByteArrayOutputStream()
     bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
@@ -939,6 +918,7 @@ private fun bitmapToLosslessPngBytes(bitmap: Bitmap): ByteArray {
     }
 }
 
+// Calculates where the image is actually drawn inside the container when using ContentScale.Fit.
 private fun calculateFittedImageRect(
     containerWidth: Float,
     containerHeight: Float,
@@ -982,6 +962,7 @@ private fun calculateFittedImageRect(
     }
 }
 
+// Converts normalized image coordinates into screen coordinates.
 private fun Offset.toScreenOffset(imageRect: Rect): Offset {
     return Offset(
         x = imageRect.left + x.coerceIn(0f, 1f) * imageRect.width,
@@ -989,6 +970,7 @@ private fun Offset.toScreenOffset(imageRect: Rect): Offset {
     )
 }
 
+// Converts normalized image coordinates into real bitmap pixel coordinates.
 private fun Offset.toBitmapPoint(bitmap: Bitmap): Offset {
     return Offset(
         x = x.coerceIn(0f, 1f) * bitmap.width,
@@ -996,6 +978,7 @@ private fun Offset.toBitmapPoint(bitmap: Bitmap): Offset {
     )
 }
 
+// Detects whether the user touched a corner handle or the inside of the selected quadrilateral.
 private fun detectCornerDragTarget(
     touch: Offset,
     imageRect: Rect,
@@ -1026,6 +1009,7 @@ private fun detectCornerDragTarget(
     }
 }
 
+// Updates document corner positions according to the current drag gesture.
 private fun updateDocumentCornersByDrag(
     corners: DocumentCorners,
     target: CornerDragTarget,
@@ -1080,6 +1064,7 @@ private fun updateDocumentCornersByDrag(
     }
 }
 
+// Draws a visible draggable corner handle on the canvas.
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCornerHandle(
     center: Offset
 ) {
@@ -1108,10 +1093,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCornerHandle(
     )
 }
 
+// Returns the Euclidean distance between two points.
 private fun distance(a: Offset, b: Offset): Float {
     return hypot(a.x - b.x, a.y - b.y)
 }
 
+// Checks whether a point is inside a quadrilateral by splitting it into two triangles.
 private fun isPointInsideQuad(
     p: Offset,
     a: Offset,
@@ -1122,6 +1109,7 @@ private fun isPointInsideQuad(
     return isPointInTriangle(p, a, b, c) || isPointInTriangle(p, a, c, d)
 }
 
+// Checks whether a point is inside a triangle using area comparison.
 private fun isPointInTriangle(
     p: Offset,
     a: Offset,
@@ -1136,6 +1124,7 @@ private fun isPointInTriangle(
     return abs(area - (area1 + area2 + area3)) < 1.5f
 }
 
+// Calculates the area of a triangle using its three points.
 private fun triangleArea(
     a: Offset,
     b: Offset,

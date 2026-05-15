@@ -1,39 +1,45 @@
-package org.gpproject.backend.service;
+package org.gpproject.backend.service.text;
 
-import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
-@EnableScheduling
 public class QueueService {
 
     private final GeminiService geminiService;
 
-    // ✅ Ticket store (owner + status + payload)
+    // Stores ticket status and final payload by ticket ID.
     private final ConcurrentHashMap<String, TicketState> tickets = new ConcurrentHashMap<>();
+
+    // Stores the original user prompt by ticket ID until the job is processed.
     private final ConcurrentHashMap<String, String> ticketPrompts = new ConcurrentHashMap<>();
 
-    // ✅ Per-user queues (fairness)
+    // Keeps a separate queue for each client to provide fair scheduling.
     private final ConcurrentHashMap<String, ConcurrentLinkedQueue<String>> userQueues = new ConcurrentHashMap<>();
+
+    // Stores client IDs waiting for processing in round-robin order.
     private final ConcurrentLinkedQueue<String> roundRobinUsers = new ConcurrentLinkedQueue<>();
+
+    // Prevents adding the same client multiple times to the round-robin queue.
     private final Set<String> usersInRoundRobin = ConcurrentHashMap.newKeySet();
 
-    // ✅ Worker pool (aynı anda kaç Gemini çağrısı)
-    private static final int MAX_CONCURRENT_WORKERS = 2; // ihtiyaca göre 1-4
+    // Limits how many Gemini text generation jobs can run at the same time.
+    private static final int MAX_CONCURRENT_WORKERS = 2;
     private final Semaphore workerPermits = new Semaphore(MAX_CONCURRENT_WORKERS);
 
+    // Worker pool used to process Gemini jobs in background threads.
     private final ExecutorService executor = Executors.newFixedThreadPool(
             MAX_CONCURRENT_WORKERS,
             new ThreadFactory() {
                 private final AtomicInteger i = new AtomicInteger(1);
-                @Override public Thread newThread(Runnable r) {
+
+                @Override
+                public Thread newThread(Runnable r) {
                     Thread t = new Thread(r, "gemini-worker-" + i.getAndIncrement());
                     t.setDaemon(true);
                     return t;
@@ -41,34 +47,35 @@ public class QueueService {
             }
     );
 
-    // ✅ Rate limit (global). Gemini kota/rate için.
-    // Örn: 1200ms => ~0.8 req/s. (Senin eski hal 5000ms idi.)
+    // Global minimum interval between Gemini API calls.
     private static final long MIN_INTERVAL_MS = 1200;
     private final Object rateLock = new Object();
     private long lastCallMs = 0;
 
-    // ✅ TTL cleanup (RAM şişmesin)
-    private static final long TTL_MS = 2L * 60L * 60L * 1000L; // 2 saat
+    // Ticket lifetime before it is removed from memory.
+    private static final long TTL_MS = 2L * 60L * 60L * 1000L;
 
     public QueueService(GeminiService geminiService) {
         this.geminiService = geminiService;
     }
 
-    // Producer
+    // Adds a new prompt request to the client's queue and returns a ticket ID.
     public String addToQueue(String clientId, String promptText) {
-
         userQueues.putIfAbsent(clientId, new ConcurrentLinkedQueue<>());
         ConcurrentLinkedQueue<String> q = userQueues.get(clientId);
 
         String ticketId = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
 
-        tickets.put(ticketId, new TicketState(clientId, TicketState.Status.QUEUED, null, now));
-        ticketPrompts.put(ticketId, promptText);
+        tickets.put(
+                ticketId,
+                new TicketState(clientId, TicketState.Status.QUEUED, null, now)
+        );
 
+        ticketPrompts.put(ticketId, promptText);
         q.add(ticketId);
 
-        // round robin listesine user ekle (bir kere)
+        // Add this client to round-robin scheduling only once.
         if (usersInRoundRobin.add(clientId)) {
             roundRobinUsers.add(clientId);
         }
@@ -76,26 +83,32 @@ public class QueueService {
         return ticketId;
     }
 
-    // ✅ Owner check (çok kullanıcı için kritik)
+    // Returns a ticket only if it belongs to the requesting client.
     public TicketState getTicket(String clientId, String ticketId) {
         TicketState st = tickets.get(ticketId);
-        if (st == null) return null;
 
-        // anonymous kullanan eski clientlar için: owner kontrolü gevşek olabilir.
-        // Gerçek multi-user için Android mutlaka X-Client-Id göndermeli.
-        if (!"anonymous".equals(clientId) && !st.getOwnerClientId().equals(clientId)) {
-            return null; // başkası görmesin
+        if (st == null) {
+            return null;
         }
+
+        // For real multi-user behavior, Android should always send X-Client-Id.
+        if (!"anonymous".equals(clientId) && !st.getOwnerClientId().equals(clientId)) {
+            return null;
+        }
+
         return st;
     }
 
-    // Dispatcher: sık çalışır, permit varsa iş dağıtır
+    // Periodically dispatches queued tickets to available workers.
     @Scheduled(fixedDelay = 200)
     public void dispatch() {
-        // permit yoksa çık
-        if (!workerPermits.tryAcquire()) return;
+        // If all workers are busy, do not start another job.
+        if (!workerPermits.tryAcquire()) {
+            return;
+        }
 
         String clientId = roundRobinUsers.poll();
+
         if (clientId == null) {
             workerPermits.release();
             return;
@@ -104,26 +117,31 @@ public class QueueService {
         ConcurrentLinkedQueue<String> q = userQueues.get(clientId);
         String ticketId = (q != null) ? q.poll() : null;
 
-        // bu user’ın kuyruğu boşsa round robin’den düş
+        // If this client's queue is empty, remove it from round-robin.
         if (ticketId == null) {
             usersInRoundRobin.remove(clientId);
             workerPermits.release();
             return;
         }
 
-        // kuyruğunda hâlâ iş varsa user’ı sona ekle (round robin)
+        // If the client still has queued jobs, put it back at the end.
         if (q != null && !q.isEmpty()) {
             roundRobinUsers.add(clientId);
         } else {
             usersInRoundRobin.remove(clientId);
         }
 
-        // işi worker’a ver
+        // Mark this ticket as currently processing.
         TicketState current = tickets.get(ticketId);
+
         if (current != null) {
-            tickets.put(ticketId, current.withStatus(TicketState.Status.PROCESSING, null));
+            tickets.put(
+                    ticketId,
+                    current.withStatus(TicketState.Status.PROCESSING, null)
+            );
         }
 
+        // Submit the actual Gemini work to the background executor.
         executor.submit(() -> {
             try {
                 processOne(ticketId);
@@ -133,40 +151,68 @@ public class QueueService {
         });
     }
 
+    // Processes one queued Gemini text-generation job.
     private void processOne(String ticketId) {
         String prompt = ticketPrompts.get(ticketId);
+
         if (prompt == null) {
             TicketState st = tickets.get(ticketId);
-            if (st != null) tickets.put(ticketId, st.withStatus(TicketState.Status.FAILED, null));
+
+            if (st != null) {
+                tickets.put(ticketId, st.withStatus(TicketState.Status.FAILED, null));
+            }
+
             return;
         }
 
         try {
-            // ✅ global rate-limit
+            // Apply global rate limiting before calling Gemini.
             synchronized (rateLock) {
                 long now = System.currentTimeMillis();
                 long wait = MIN_INTERVAL_MS - (now - lastCallMs);
-                if (wait > 0) Thread.sleep(wait);
+
+                if (wait > 0) {
+                    Thread.sleep(wait);
+                }
+
                 lastCallMs = System.currentTimeMillis();
             }
 
             String payload = geminiService.callGemini(prompt);
+
             TicketState st = tickets.get(ticketId);
-            if (st != null) tickets.put(ticketId, st.withStatus(TicketState.Status.COMPLETED, payload));
+
+            if (st != null) {
+                tickets.put(
+                        ticketId,
+                        st.withStatus(TicketState.Status.COMPLETED, payload)
+                );
+            }
 
         } catch (Exception e) {
             TicketState st = tickets.get(ticketId);
-            if (st != null) tickets.put(ticketId, st.withStatus(TicketState.Status.FAILED, null));
+
+            if (st != null) {
+                tickets.put(ticketId, st.withStatus(TicketState.Status.FAILED, null));
+            }
+
         } finally {
+            // Remove the original prompt after the job finishes to reduce memory usage.
             ticketPrompts.remove(ticketId);
         }
     }
 
-    // TTL cleanup
-    @Scheduled(fixedDelay = 10 * 60 * 1000) // 10 dk
+    // Periodically removes expired tickets and orphan prompt data.
+    @Scheduled(fixedDelay = 10 * 60 * 1000)
     public void cleanup() {
         long now = System.currentTimeMillis();
-        tickets.entrySet().removeIf(e -> now - e.getValue().getCreatedAtMs() > TTL_MS);
-        ticketPrompts.keySet().removeIf(id -> !tickets.containsKey(id));
+
+        tickets.entrySet().removeIf(e ->
+                now - e.getValue().getCreatedAtMs() > TTL_MS
+        );
+
+        ticketPrompts.keySet().removeIf(id ->
+                !tickets.containsKey(id)
+        );
     }
 }

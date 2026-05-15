@@ -10,9 +10,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -49,24 +49,40 @@ private const val THEME_PREFS = "theme_preferences"
 private const val THEME_MODE_KEY = "theme_mode"
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Enables drawing behind system bars for a modern edge-to-edge layout.
         enableEdgeToEdge()
+
         setContent {
             val context = LocalContext.current
+
+            // Loads and keeps the selected theme mode across recompositions.
             var themeMode by rememberSaveable {
                 mutableStateOf(loadThemeMode(context))
             }
 
             SmartPetitionGeneratorDemoTheme(themeMode = themeMode) {
-                // Veritabanı
-                val database = remember { AppDatabase.getDatabase(context) }
-
-                val repository = remember {
-                    MainRepository(context, database.petitionDao(), NetworkModule.apiService)
+                // Creates the local Room database instance.
+                val database = remember {
+                    AppDatabase.getDatabase(context)
                 }
 
-                val viewModel = remember { PetitionViewModel(repository) }
+                // Creates the repository that connects local DB and remote API.
+                val repository = remember {
+                    MainRepository(
+                        context,
+                        database.petitionDao(),
+                        NetworkModule.apiService
+                    )
+                }
+
+                // Creates the shared ViewModel used by all screens.
+                val viewModel = remember {
+                    PetitionViewModel(repository)
+                }
 
                 MainScreen(
                     viewModel = viewModel,
@@ -81,12 +97,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// Loads the saved theme mode from SharedPreferences.
 private fun loadThemeMode(context: Context): ThemeMode {
-    val prefs = context.getSharedPreferences(THEME_PREFS, Context.MODE_PRIVATE)
-    return ThemeMode.fromStorageValue(prefs.getString(THEME_MODE_KEY, null))
+    val prefs = context.getSharedPreferences(
+        THEME_PREFS,
+        Context.MODE_PRIVATE
+    )
+
+    return ThemeMode.fromStorageValue(
+        prefs.getString(THEME_MODE_KEY, null)
+    )
 }
 
-private fun saveThemeMode(context: Context, themeMode: ThemeMode) {
+// Saves the selected theme mode into SharedPreferences.
+private fun saveThemeMode(
+    context: Context,
+    themeMode: ThemeMode
+) {
     context.getSharedPreferences(THEME_PREFS, Context.MODE_PRIVATE)
         .edit()
         .putString(THEME_MODE_KEY, themeMode.storageValue)
@@ -99,8 +126,10 @@ fun MainScreen(
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit
 ) {
+    // Navigation controller used by all screens.
     val navController = rememberNavController()
 
+    // Tracks the current route to update bottom navigation selection.
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
@@ -108,20 +137,63 @@ fun MainScreen(
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
             NavigationBar {
-                // Menü Elemanları
-                val items = listOf("Ana Sayfa", "Oluştur", "Tara", "Geçmiş", "Profil")
-                val icons = listOf(Icons.Default.Home, Icons.Default.Add, Icons.Default.CameraAlt, Icons.Default.Refresh, Icons.Default.Person)
-                val routes = listOf("home", "create", "scan", "history", "profile")
+                // Bottom navigation items.
+                val items = listOf(
+                    "Ana Sayfa",
+                    "Oluştur",
+                    "Tara",
+                    "Geçmiş",
+                    "Profil"
+                )
+
+                val icons = listOf(
+                    Icons.Default.Home,
+                    Icons.Default.Add,
+                    Icons.Default.CameraAlt,
+                    Icons.Default.History,
+                    Icons.Default.Person
+                )
+
+                val routes = listOf(
+                    "home",
+                    "create",
+                    "scan",
+                    "history",
+                    "profile"
+                )
 
                 items.forEachIndexed { index, item ->
+                    val route = routes[index]
+
                     NavigationBarItem(
-                        icon = { Icon(icons[index], contentDescription = item) },
-                        label = { Text(item) },
-                        selected = if (routes[index] == "create") currentRoute?.startsWith("create") == true else currentRoute == routes[index],
+                        icon = {
+                            Icon(
+                                icons[index],
+                                contentDescription = item
+                            )
+                        },
+                        label = {
+                            Text(item)
+                        },
+                        selected = when (route) {
+                            "create" ->
+                                currentRoute == "create" ||
+                                        currentRoute?.startsWith("template_form") == true
+
+                            else ->
+                                currentRoute == route
+                        },
                         onClick = {
-                            navController.navigate(routes[index]) {
-                                popUpTo("home") { saveState = true }
+                            navController.navigate(route) {
+                                // Keeps bottom navigation state stable.
+                                popUpTo("home") {
+                                    saveState = true
+                                }
+
+                                // Prevents duplicate copies of the same destination.
                                 launchSingleTop = true
+
+                                // Restores state when returning to a tab.
                                 restoreState = true
                             }
                         }
@@ -130,12 +202,13 @@ fun MainScreen(
             }
         }
     ) { innerPadding ->
+
+        // Main navigation graph of the application.
         NavHost(
             navController = navController,
             startDestination = "home",
             modifier = Modifier.padding(innerPadding)
         ) {
-
             composable("home") {
                 HomeScreen(
                     navController = navController,
@@ -153,11 +226,18 @@ fun MainScreen(
                 )
             }
 
+            // Opens CreatePetitionScreen in ready-template form mode.
             composable(
                 route = "template_form/{readyTemplateId}",
-                arguments = listOf(navArgument("readyTemplateId") { type = NavType.StringType })
+                arguments = listOf(
+                    navArgument("readyTemplateId") {
+                        type = NavType.StringType
+                    }
+                )
             ) { backStackEntry ->
-                val readyTemplateId = backStackEntry.arguments?.getString("readyTemplateId")
+                val readyTemplateId =
+                    backStackEntry.arguments?.getString("readyTemplateId")
+
                 CreatePetitionScreen(
                     navController = navController,
                     viewModel = viewModel,
@@ -167,11 +247,17 @@ fun MainScreen(
             }
 
             composable("history") {
-                HistoryScreen(navController = navController, viewModel = viewModel)
+                HistoryScreen(
+                    navController = navController,
+                    viewModel = viewModel
+                )
             }
 
             composable("scan") {
-                ScanToPreviewScreen(navController = navController, viewModel = viewModel)
+                ScanToPreviewScreen(
+                    navController = navController,
+                    viewModel = viewModel
+                )
             }
 
             composable("profile") {
@@ -180,20 +266,29 @@ fun MainScreen(
                     viewModel = viewModel,
                     selectedThemeMode = themeMode,
                     onThemeModeChange = onThemeModeChange
-                )            }
+                )
+            }
 
+            // Opens a saved petition by ID.
+            // mode=share automatically starts the PDF/share flow.
             composable(
                 route = "preview_screen/{petitionId}?mode={mode}",
                 arguments = listOf(
-                    navArgument("petitionId") { type = NavType.IntType },
+                    navArgument("petitionId") {
+                        type = NavType.IntType
+                    },
                     navArgument("mode") {
                         type = NavType.StringType
                         defaultValue = "edit"
                     }
                 )
             ) { backStackEntry ->
-                val petitionId = backStackEntry.arguments?.getInt("petitionId") ?: -1
-                val mode = backStackEntry.arguments?.getString("mode") ?: "edit"
+                val petitionId =
+                    backStackEntry.arguments?.getInt("petitionId") ?: -1
+
+                val mode =
+                    backStackEntry.arguments?.getString("mode") ?: "edit"
+
                 PreviewScreen(
                     navController = navController,
                     viewModel = viewModel,
@@ -202,8 +297,13 @@ fun MainScreen(
                 )
             }
 
+            // Opens a new preview from current ViewModel preview HTML.
             composable("preview_screen/new") {
-                PreviewScreen(navController, viewModel, null)
+                PreviewScreen(
+                    navController = navController,
+                    viewModel = viewModel,
+                    petitionId = null
+                )
             }
         }
     }

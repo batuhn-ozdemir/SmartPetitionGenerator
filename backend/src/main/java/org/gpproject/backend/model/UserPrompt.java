@@ -8,5 +8,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class UserPrompt {
+
+    // User's natural language petition request.
     private String text;
 }

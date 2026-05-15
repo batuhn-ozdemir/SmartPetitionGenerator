@@ -30,6 +30,7 @@ import kotlin.math.min
 
 class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
 
+    // Represents the source of the currently displayed preview.
     enum class PreviewOrigin {
         NONE,
         AI_ASSISTANT,
@@ -38,15 +39,19 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         MANUAL
     }
 
+    // Saved petition history observed from the local Room database.
     val historyList: StateFlow<List<PetitionEntity>> = repository.allPetitions
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    // Current AI workflow state observed by Compose screens.
     private val _aiState = mutableStateOf<AiState>(AiState.Idle)
     val aiState: State<AiState> = _aiState
 
+    // Saved user profile used for auto-filling common petition fields.
     private val _userProfile = mutableStateOf<UserProfile?>(null)
     val userProfile: State<UserProfile?> = _userProfile
 
+    // Gson instance with custom InputField deserializer to support flexible backend formats.
     private val gson = GsonBuilder()
         .registerTypeAdapter(InputField::class.java, InputFieldDeserializer())
         .create()
@@ -83,10 +88,12 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
+    // Loads the saved user profile from local storage.
     fun loadProfile() {
         viewModelScope.launch { _userProfile.value = repository.getUserProfile() }
     }
 
+    // Saves the user profile and updates the in-memory UI state.
     fun saveProfile(profile: UserProfile) {
         viewModelScope.launch {
             repository.saveUserProfile(profile)
@@ -94,6 +101,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
+    // Polls the backend until the AI generation request is completed or failed.
     private suspend fun pollUntilCompleted(ticketId: String): AiResponse {
         while (true) {
             delay(2000)
@@ -103,7 +111,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
-    // ---------- Dinamik alanları template placeholderlarından çıkar ----------
+    // Extracts {{PLACEHOLDER}} keys from a template HTML string.
     private fun extractPlaceholders(html: String): Set<String> {
         val regex = Regex("""\{\{\s*([A-Za-z0-9_]+)\s*\}\}""")
         return regex.findAll(html)
@@ -111,6 +119,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             .toSet()
     }
 
+    // Converts placeholder keys into user-friendly form labels.
     private fun labelForKey(key: String): String = when (key) {
         "AD_SOYAD" -> "Ad Soyad"
         "TCKN" -> "T.C. Kimlik No"
@@ -140,6 +149,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         else -> humanLabelFromKey(key)
     }
 
+    // Chooses the input type for a form field based on its placeholder key.
     private fun typeForKey(key: String): String = when (key) {
         "TCKN", "OGRENCI_NO" -> "number"
         "TELEFON" -> "phone"
@@ -171,6 +181,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         """.trimIndent()
     }
 
+    // Normalizes raw placeholder keys to a consistent uppercase format.
     private fun canonicalKey(raw: String): String {
         var k = raw.trim().uppercase()
         while (k.startsWith("_")) k = k.substring(1)
@@ -187,6 +198,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             }
     }
 
+    // Returns saved profile fields as template parameters.
     private fun profileParams(): Map<String, String> {
         val p = _userProfile.value ?: return emptyMap()
         val m = mutableMapOf<String, String>()
@@ -197,11 +209,8 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         return m
     }
 
-    /** Formda göstereceğimiz alan listesi:
-     *  - template placeholder keys
-     *  - givenParams keys (prompttan yakalananlar) -> kullanıcı görsün/düzeltsin
-     *  - kişisel alanlar (4 tane) -> profilde varsa dolu görünsün
-     */
+    // Builds the dynamic form field list using template placeholders,
+    // AI-provided values, required fields, and personal profile fields.
     private fun buildFormFields(
         templateHtml: String,
         givenParams: Map<String, String>,
@@ -275,6 +284,8 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         return readyTemplates.value.firstOrNull { it.id == id }
     }
 
+    // Starts the AI-assisted petition generation flow.
+    // First AI call returns a template and required form fields, not the final petition.
     fun generatePetition(prompt: String) {
         viewModelScope.launch {
             try {
@@ -399,6 +410,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
+    // Adds strict instructions so the backend does not generate attachment fields.
     private fun buildNoAttachmentsInstructionPrompt(userPrompt: String): String {
         return buildString {
             appendLine(userPrompt.trim())
@@ -410,6 +422,8 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }.trim()
     }
 
+    // Submits the dynamic form values and creates the final petition preview.
+    // Ready templates are rendered locally; AI drafts are finalized by a second AI call.
     fun submitDynamicForm(petitionData: AiGeneratedPetition, userInputs: Map<String, String>) {
         viewModelScope.launch {
             try {
@@ -448,10 +462,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                         return@launch
                     }
 
-                    val done = pollUntilCompleted(ticketId) ?: run {
-                        _aiState.value = AiState.Error("Zaman aşımı. Tekrar deneyin.")
-                        return@launch
-                    }
+                    val done = pollUntilCompleted(ticketId)
 
                     if (done.status == "FAILED") {
                         _aiState.value = AiState.Error("İşlem başarısız oldu.")
@@ -490,6 +501,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
+    // Replaces {{KEY}} placeholders in a ready template with provided parameter values.
     private fun renderTemplate(templateHtml: String, params: Map<String, String>): String {
         val safeTemplate = normalizeBrokenPlaceholders(templateHtml)
         val regex = Regex("""\{\{\s*([A-Za-z0-9_]+)\s*\}\}""")
@@ -507,6 +519,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
+    // Builds the second-stage AI prompt used to produce the final HTML petition.
     private fun buildFinalPrompt(originalPrompt: String, templateHtml: String, params: Map<String, String>): String {
         val sb = StringBuilder()
         val missingKeys = extractPlaceholders(templateHtml)
@@ -555,12 +568,14 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         return sb.toString()
     }
 
+    // Resets only the AI workflow state.
     fun resetState() {
         _aiState.value = AiState.Idle
         draftMode = DraftMode.AI
         lastUserPrompt = ""
     }
 
+    // Clears the currently displayed preview and template-save metadata.
     fun clearCurrentPreview() {
         _currentPreviewHtml.value = null
         _canSaveCurrentPreviewAsTemplate.value = false
@@ -569,12 +584,14 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         lastTemplateSourceHtml = null
     }
 
+    // Updates the current preview manually, usually from the editor screen.
     fun updateCurrentPreviewHtml(newHtml: String) {
         _currentPreviewHtml.value = newHtml
         _canSaveCurrentPreviewAsTemplate.value = false
         _currentPreviewOrigin.value = PreviewOrigin.MANUAL
     }
 
+    // Creates an A4 HTML preview from positioned OCR text lines.
     private fun createPreviewFromOcrTextLayout(
         imageWidthPx: Int,
         imageHeightPx: Int,
@@ -603,6 +620,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         return GeminiOcrPreviewResult.Success(1.0)
     }
 
+    // Sends the selected document image to the OCR backend and creates a preview from the result.
     suspend fun createPreviewFromGeminiDocumentLayout(
         imageBytes: ByteArray,
         mimeType: String
@@ -728,6 +746,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
     }
 
 
+    // Saves the current preview HTML into local petition history.
     suspend fun saveCurrentPreviewToHistory(title: String): Int? {
         val html = _currentPreviewHtml.value?.trim().orEmpty()
         if (html.isBlank()) return null
@@ -757,6 +776,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         return repository.savePetitionDraft(newDraft).toInt()
     }
 
+    // Async wrapper used by Compose screens to save preview history.
     fun saveCurrentPreviewToHistory(title: String, onSaved: (Int?) -> Unit) {
         viewModelScope.launch {
             onSaved(saveCurrentPreviewToHistory(title))
@@ -765,6 +785,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
 
     suspend fun getPetitionById(id: Int) = repository.getPetitionById(id)
 
+    // Updates an existing saved petition with edited HTML.
     fun saveEditedPetition(
         id: Int,
         html: String,
@@ -776,7 +797,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
-    // ✅ AI ile üretilen taslağı, ready_templates formatında DB'ye göm
+    // Saves an AI-generated template into the ready_templates table.
     fun saveAsTemplate(templateName: String, aiData: AiGeneratedPetition) {
         viewModelScope.launch {
             val template = aiData.templateHtml
@@ -802,6 +823,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
+    // Removes attachment placeholders before saving a template.
     private fun stripAttachmentsParametersForTemplateSave(templateHtml: String): String {
         return templateHtml
             .replace("{{EKLER_LISTESI}}", "")
@@ -811,6 +833,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             .trim()
     }
 
+    // Extracts the inner content from the A4 wrapper HTML.
     private fun extractA4InnerHtml(wrappedHtml: String): String {
         val wrapperRegex = Regex(
             """<div\s+class=["']a4-page["'][^>]*>([\s\S]*)</div>\s*</body>""",
@@ -830,6 +853,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         )
     }
 
+    // Converts filled preview HTML back into a reusable template by restoring placeholders.
     private fun sanitizePreviewHtmlToTemplate(innerHtml: String): String {
 
         if (innerHtml.isBlank()) return ""
@@ -894,7 +918,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         return normalized
     }
 
-
+    // Saves the current preview as a reusable ready template.
     fun saveCurrentPreviewAsTemplate(
         templateName: String,
         currentPreviewHtml: String?,
@@ -934,6 +958,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
         }
     }
 
+    // Deletes only AI-generated ready templates.
     fun deleteAiTemplate(templateId: String) {
         viewModelScope.launch {
             repository.deleteAiGeneratedReadyTemplate(templateId)
@@ -944,6 +969,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
     fun deletePetition(p: PetitionEntity) =
         viewModelScope.launch { repository.deletePetition(p) }
 
+    // Polls the backend until the OCR layout analysis is completed or failed.
     private suspend fun pollUntilOcrCompleted(ticketId: String): OcrQueueResponse {
         while (true) {
             delay(2000)
@@ -955,6 +981,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
     }
 }
 
+// Represents a positioned OCR line prepared for HTML rendering.
 private data class OcrRenderableLine(
     val text: String,
     val leftPx: Int,
@@ -965,6 +992,7 @@ private data class OcrRenderableLine(
     val writingType: String?
 )
 
+// Converts raw OCR positioned text into renderable lines with estimated font sizes.
 private fun buildRenderableLines(
     imageWidthPx: Int,
     imageHeightPx: Int,
@@ -1010,6 +1038,7 @@ private fun buildRenderableLines(
     }
 }
 
+// Filters OCR lines to the most likely paper area and removes outside noise.
 private fun filterLinesToLikelyPaperArea(
     imageWidthPx: Int,
     imageHeightPx: Int,
@@ -1051,6 +1080,7 @@ private fun filterLinesToLikelyPaperArea(
     return if (filtered.size >= 3) filtered else lines
 }
 
+// Returns an approximate percentile value from a sorted integer list.
 private fun percentile(sortedValues: List<Int>, ratio: Float): Int {
     if (sortedValues.isEmpty()) return 0
     val boundedRatio = ratio.coerceIn(0f, 1f)
@@ -1058,10 +1088,12 @@ private fun percentile(sortedValues: List<Int>, ratio: Float): Int {
     return sortedValues[idx]
 }
 
+// Normalizes OCR text for duplicate detection.
 private fun normalizeOcrText(text: String): String {
     return text.trim().lowercase().replace(Regex("\\s+"), " ")
 }
 
+// Detects whether the backend returned an HTML error template instead of a valid petition.
 private fun isBackendErrorTemplate(html: String): Boolean {
     return Regex(
         """<h3[^>]*>\s*HATA\s*</h3>""",
@@ -1074,6 +1106,7 @@ private sealed class OcrHtmlBuildResult {
     data class Error(val message: String) : OcrHtmlBuildResult()
 }
 
+// Builds flowing HTML paragraphs from positioned OCR text lines.
 private fun buildFlowingOcrHtml(
     imageWidthPx: Int,
     imageHeightPx: Int,

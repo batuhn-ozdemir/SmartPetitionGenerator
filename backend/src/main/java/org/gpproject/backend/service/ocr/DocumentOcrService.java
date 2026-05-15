@@ -1,4 +1,4 @@
-package org.gpproject.backend.service;
+package org.gpproject.backend.service.ocr;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -22,25 +22,35 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+// This service sends a document image to Gemini and converts the model output
+// into a structured OCR layout response with text lines and bounding boxes.
 @Service
 public class DocumentOcrService {
 
+    // Comma-separated Gemini API keys loaded from application.properties.
     @Value("#{'${gemini.api.keys}'.split(',')}")
     private List<String> apiKeys;
 
+    // OCR model used for document layout extraction.
     private static final String OCR_MODEL = "gemini-2.5-flash";
+
+    // Gemini generateContent endpoint template.
     private static final String GEMINI_URL_TEMPLATE =
             "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent";
 
+    // Rotates API keys across requests.
     private final AtomicInteger currentKeyIndex = new AtomicInteger(0);
+
     private final Gson gson = new Gson();
 
+    // HTTP client with longer read timeout because OCR can take time.
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .build();
 
+    // Analyzes a Base64-encoded document image and returns structured OCR layout data.
     public OcrLayoutResponse analyzeDocumentLayout(String imageBase64, String mimeType) {
         if (imageBase64 == null || imageBase64.isBlank()) {
             return fail("EMPTY_IMAGE", "Fotoğraf gönderilemedi.");
@@ -122,7 +132,9 @@ public class DocumentOcrService {
                 - Return JSON only. No markdown. No explanation.
                 """;
 
+        // Build Gemini request body with a strict OCR prompt and inline image data.
         JsonObject requestBody = new JsonObject();
+
         JsonArray contents = new JsonArray();
         JsonObject userContent = new JsonObject();
         userContent.addProperty("role", "user");
@@ -156,6 +168,7 @@ public class DocumentOcrService {
         String lastErrorMessage = "Belge analizi başarısız oldu.";
         long backoffMs = 1000L;
 
+        // Try the OCR request multiple times to handle rate limits and temporary upstream errors.
         for (int attempt = 0; attempt < 3; attempt++) {
             String apiKey = getNextApiKey(keys);
             String fullUrl = GEMINI_URL_TEMPLATE.formatted(OCR_MODEL) + "?key=" + apiKey;
@@ -168,6 +181,7 @@ public class DocumentOcrService {
             try (Response response = client.newCall(request).execute()) {
                 int code = response.code();
 
+                // Handle Gemini API errors such as rate limit, server errors, or payload size problems.
                 if (!response.isSuccessful()) {
                     String responseBody = response.body() != null ? response.body().string() : "";
                     String providerError = extractProviderErrorMessage(responseBody);
@@ -204,6 +218,8 @@ public class DocumentOcrService {
                 }
 
                 String responseBody = response.body() != null ? response.body().string() : "";
+
+                // Extract the model's text output from the Gemini response envelope.
                 String aiRaw = extractModelText(responseBody);
                 if (aiRaw == null || aiRaw.isBlank()) {
                     lastErrorCode = "PARSING_ERROR";
@@ -212,11 +228,9 @@ public class DocumentOcrService {
                     continue;
                 }
 
+                // Parse the model output into OcrLayoutResponse.
+                // The parser also handles markdown fences or slightly malformed JSON.
                 OcrLayoutResponse parsed = parseOcrLayoutFromModelText(aiRaw);
-//                if (parsed != null) {
-//                    normalizeLineTexts(parsed);
-//                    return parsed;
-//                }
 
                 if (parsed == null) {
                     System.out.println("OCR RAW RESPONSE:\n" + aiRaw);
@@ -226,6 +240,7 @@ public class DocumentOcrService {
                     continue;
                 }
 
+                // Clean text, bounding boxes, reading order, indentation, and default fields.
                 normalizeLineTexts(parsed);
                 normalizeResponse(parsed);
 
@@ -251,6 +266,7 @@ public class DocumentOcrService {
         return fail(lastErrorCode, lastErrorMessage);
     }
 
+    // Returns valid API keys after trimming empty or placeholder values.
     private List<String> normalizedApiKeys() {
         if (apiKeys == null) return List.of();
         return apiKeys.stream()
@@ -260,15 +276,18 @@ public class DocumentOcrService {
                 .collect(Collectors.toList());
     }
 
+    // Returns the next API key using round-robin selection.
     private String getNextApiKey(List<String> keys) {
         int index = currentKeyIndex.getAndUpdate(i -> (i + 1) % keys.size());
         return keys.get(index);
     }
 
+    // Creates a failed OCR response with a standard structure.
     private OcrLayoutResponse fail(String code, String message) {
         return new OcrLayoutResponse(false, code, message, 0.0, false, 0, 0, List.of());
     }
 
+    // Extracts the text field from the Gemini generateContent response.
     private String extractModelText(String responseBody) {
         try {
             JsonObject root = JsonParser.parseString(responseBody).getAsJsonObject();
@@ -283,6 +302,7 @@ public class DocumentOcrService {
         }
     }
 
+    // Extracts a readable provider error message from Gemini error responses.
     private String extractProviderErrorMessage(String responseBody) {
         if (responseBody == null || responseBody.isBlank()) return "";
         try {
@@ -297,6 +317,7 @@ public class DocumentOcrService {
         return "";
     }
 
+    // Determines how long to wait before retrying after a rate-limit response.
     private long parseRetryDelayMs(Response response, String providerError, long fallbackMs) {
         String retryHeader = response.header("Retry-After");
         if (retryHeader != null) {
@@ -320,6 +341,7 @@ public class DocumentOcrService {
         return Math.max(1000L, fallbackMs);
     }
 
+    // Attempts to parse OCR layout JSON from the raw model output.
     private OcrLayoutResponse parseOcrLayoutFromModelText(String aiRaw) {
         if (aiRaw == null || aiRaw.isBlank()) return null;
 
@@ -352,6 +374,7 @@ public class DocumentOcrService {
         return null;
     }
 
+    // Normalizes curly quotes and apostrophes in OCR line texts.
     private void normalizeLineTexts(OcrLayoutResponse response) {
         if (response == null || response.getLines() == null) return;
 
@@ -368,6 +391,7 @@ public class DocumentOcrService {
         }
     }
 
+    // Extracts the broadest JSON object from text if the model adds extra content.
     private String extractJsonIfAny(String text) {
         if (text == null) return "";
         String t = text.trim();
@@ -379,6 +403,7 @@ public class DocumentOcrService {
         return t;
     }
 
+    // Repairs common JSON issues such as trailing commas and control characters.
     private String repairLikelyJson(String text) {
         if (text == null || text.isBlank()) return "";
         return text
@@ -387,6 +412,7 @@ public class DocumentOcrService {
                 .trim();
     }
 
+    // Extracts the first balanced JSON object from a text response.
     private String extractFirstJsonObject(String text) {
         if (text == null || text.isBlank()) return "";
         int start = text.indexOf('{');
@@ -430,6 +456,7 @@ public class DocumentOcrService {
         return "";
     }
 
+    // Normalizes OCR lines, coordinates, reading order, confidence, and empty fields.
     private void normalizeResponse(OcrLayoutResponse response) {
         if (response == null) return;
 
@@ -484,6 +511,7 @@ public class DocumentOcrService {
         }
     }
 
+    // Aligns small accidental left-position differences while keeping real paragraph indents.
     private void normalizeNonParagraphLineIndents(List<OcrLayoutResponse.OcrLine> lines) {
         if (lines == null || lines.isEmpty()) return;
 
@@ -515,6 +543,7 @@ public class DocumentOcrService {
         }
     }
 
+    // Decides whether an indented line should be preserved as a heading or paragraph start.
     private boolean isHeadingOrParagraphStart(List<OcrLayoutResponse.OcrLine> lines,
                                               int index,
                                               int baseLeft,
@@ -544,6 +573,7 @@ public class DocumentOcrService {
         return text.endsWith(":") || text.equals(text.toUpperCase());
     }
 
+    // Creates a stable reading-order comparator using row tolerance.
     private Comparator<OcrLayoutResponse.OcrLine> createStableReadingOrderComparator(List<OcrLayoutResponse.OcrLine> lines) {
         int medianHeight = estimateMedianLineHeight(lines);
         int sameRowTolerancePx = Math.max(6, medianHeight / 2);
@@ -565,6 +595,7 @@ public class DocumentOcrService {
         };
     }
 
+    // Estimates the median OCR line height to calculate tolerances.
     private int estimateMedianLineHeight(List<OcrLayoutResponse.OcrLine> lines) {
         if (lines == null || lines.isEmpty()) return 12;
 
@@ -582,7 +613,7 @@ public class DocumentOcrService {
         return heights.get(mid);
     }
 
-
+    // Sleeps without throwing checked InterruptedException to callers.
     private void sleepQuietly(long delayMs) {
         if (delayMs <= 0) return;
         try {

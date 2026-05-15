@@ -8,7 +8,13 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class AiResponse {
-    private String status;      // PROCESSING, COMPLETED, FAILED
+
+    // Current AI request status: PROCESSING, COMPLETED, or FAILED.
+    private String status;
+
+    // Ticket ID used by the client to poll the request status.
     private String ticketId;
+
+    // AI output or error message.
     private String payload;
 }
