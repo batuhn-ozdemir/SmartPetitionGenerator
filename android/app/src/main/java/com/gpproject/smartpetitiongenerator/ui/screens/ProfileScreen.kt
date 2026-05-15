@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -45,13 +46,16 @@ fun ProfileScreen(
     selectedThemeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit
 ) {
+    // Observes the currently saved user profile from the ViewModel.
     val currentProfile by viewModel.userProfile
 
+    // Local form state for profile fields.
     var fullName by remember { mutableStateOf("") }
     var identityNumber by remember { mutableStateOf("") }
     var phoneNumber by remember { mutableStateOf("") }
     var address by remember { mutableStateOf("") }
 
+    // Fills the form when an existing profile is loaded.
     LaunchedEffect(currentProfile) {
         currentProfile?.let {
             fullName = it.fullName
@@ -65,22 +69,35 @@ fun ProfileScreen(
         contentWindowInsets = WindowInsets(0.dp, 0.dp, 0.dp, 0.dp),
         topBar = {
             TopAppBar(
-                title = { Text("Profil Bilgileri") },
+                title = {
+                    Text("Profil Bilgileri")
+                },
                 navigationIcon = {
-                    IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Geri")
+                    IconButton(
+                        onClick = {
+                            navController.popBackStack()
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.ArrowBack,
+                            contentDescription = "Geri"
+                        )
                     }
                 }
             )
         }
     ) { padding ->
+        val scrollState = rememberScrollState()
+
         Column(
             modifier = Modifier
                 .padding(padding)
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState())
                 .fillMaxWidth()
+                .verticalScroll(scrollState)
+                .padding(16.dp)
+                .imePadding()
         ) {
+            // Explains where these profile values will be used.
             Text(
                 text = "Dilekçelerinizde otomatik kullanılacak varsayılan bilgilerinizi buradan düzenleyebilirsiniz.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -96,59 +113,99 @@ fun ProfileScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            // Theme options shown as segmented buttons.
             val themeModes = listOf(ThemeMode.LIGHT, ThemeMode.DARK)
             val themeLabels = listOf("Aydınlık", "Karanlık")
 
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            SingleChoiceSegmentedButtonRow(
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 themeModes.forEachIndexed { index, mode ->
                     SegmentedButton(
                         selected = selectedThemeMode == mode,
-                        onClick = { onThemeModeChange(mode) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = themeModes.size),
-                        label = { Text(themeLabels[index]) }
+                        onClick = {
+                            onThemeModeChange(mode)
+                        },
+                        shape = SegmentedButtonDefaults.itemShape(
+                            index = index,
+                            count = themeModes.size
+                        ),
+                        label = {
+                            Text(themeLabels[index])
+                        }
                     )
                 }
             }
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // Full name used for petition placeholders such as AD_SOYAD.
             OutlinedTextField(
                 value = fullName,
-                onValueChange = { fullName = it },
-                label = { Text("Ad Soyad") },
+                onValueChange = {
+                    fullName = it
+                },
+                label = {
+                    Text("Ad Soyad")
+                },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // National identity number used for petition placeholders such as TCKN.
             OutlinedTextField(
                 value = identityNumber,
-                onValueChange = { if (it.length <= 11) identityNumber = it },
-                label = { Text("T.C. Kimlik No") },
+                onValueChange = {
+                    if (it.length <= 11) {
+                        identityNumber = it
+                    }
+                },
+                label = {
+                    Text("T.C. Kimlik No")
+                },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number
+                )
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Phone number used for petition placeholders such as TELEFON.
             OutlinedTextField(
                 value = phoneNumber,
-                onValueChange = { phoneNumber = it },
-                label = { Text("Telefon Numarası") },
+                onValueChange = {
+                    if (it.length <= 11) {
+                        phoneNumber = it
+                    }
+                },
+                label = {
+                    Text("Telefon Numarası")
+                },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                placeholder = { Text("05XX XXX XX XX") }
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Phone
+                ),
+                placeholder = {
+                    Text("05XX XXX XX XX")
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Address used for petition placeholders such as ADRES.
             OutlinedTextField(
                 value = address,
-                onValueChange = { address = it },
-                label = { Text("Açık Adres") },
+                onValueChange = {
+                    address = it
+                },
+                label = {
+                    Text("Açık Adres")
+                },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 3,
                 maxLines = 5
@@ -156,15 +213,17 @@ fun ProfileScreen(
 
             Spacer(modifier = Modifier.height(32.dp))
 
+            // Saves the profile and returns to the previous screen.
             Button(
                 onClick = {
                     val newProfile = UserProfile(
                         id = 1,
-                        fullName = fullName,
-                        identityNumber = identityNumber,
-                        phoneNumber = phoneNumber,
-                        address = address
+                        fullName = fullName.trim(),
+                        identityNumber = identityNumber.trim(),
+                        phoneNumber = phoneNumber.trim(),
+                        address = address.trim()
                     )
+
                     viewModel.saveProfile(newProfile)
                     navController.popBackStack()
                 },

@@ -59,48 +59,69 @@ fun HomeScreen(
     templates: List<ReadyPetitionTemplate>,
     viewModel: PetitionViewModel
 ) {
+    // Stores the current search text entered by the user.
     var searchQuery by remember { mutableStateOf("") }
+
+    // Holds the AI-generated template selected for deletion.
     var pendingDeleteTemplate by remember { mutableStateOf<ReadyPetitionTemplate?>(null) }
 
+    // Filters templates by title or category according to the search query.
     val filtered = remember(searchQuery, templates) {
-        if (searchQuery.isBlank()) templates
-        else templates.filter {
-            it.title.contains(searchQuery, ignoreCase = true) ||
-                    it.category.contains(searchQuery, ignoreCase = true)
+        if (searchQuery.isBlank()) {
+            templates
+        } else {
+            templates.filter {
+                it.title.contains(searchQuery, ignoreCase = true) ||
+                        it.category.contains(searchQuery, ignoreCase = true)
+            }
         }
     }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .padding(16.dp)
     ) {
-        // Üst Başlık
+        // App title.
         Text(
             text = "Smart Petition",
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF1565C0), // Rapordaki Mavi
+            color = Color(0xFF1565C0),
             modifier = Modifier.padding(bottom = 16.dp)
         )
 
-        // Arama Çubuğu (Figure 9.1: "Dilekçe şablonu ara...")
+        // Search field for filtering ready petition templates.
         OutlinedTextField(
             value = searchQuery,
             onValueChange = { searchQuery = it },
             placeholder = { Text("Dilekçe şablonu ara...") },
             leadingIcon = { Icon(Icons.Default.Search, null) },
-            modifier = Modifier.fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(8.dp)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(8.dp)
+                ),
             shape = RoundedCornerShape(8.dp)
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        Text("Hızlı Başlangıç", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        Text(
+            "Hızlı Başlangıç",
+            fontWeight = FontWeight.Bold,
+            fontSize = 18.sp
+        )
+
         Spacer(modifier = Modifier.height(8.dp))
+
+        // Opens a blank A4 page without selecting a ready template.
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
             modifier = Modifier
                 .fillMaxWidth()
@@ -111,7 +132,8 @@ fun HomeScreen(
                         viewModel.clearCurrentPreview()
                         viewModel.resetState()
                         navController.navigate("preview_screen/new")
-                    })
+                    }
+                )
         ) {
             Row(
                 modifier = Modifier
@@ -125,8 +147,13 @@ fun HomeScreen(
                     contentDescription = null,
                     tint = Color(0xFF1565C0)
                 )
+
                 Column {
-                    Text("Kendin Dilekçe Oluştur", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Kendin Dilekçe Oluştur",
+                        fontWeight = FontWeight.SemiBold
+                    )
+
                     Text(
                         "Forma girmeden direkt boş A4 açılır",
                         fontSize = 12.sp,
@@ -137,12 +164,19 @@ fun HomeScreen(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-        Text("Hazır Şablonlar (${filtered.size})", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+
+        // Shows the number of templates after filtering.
+        Text(
+            "Hazır Şablonlar (${filtered.size})",
+            fontWeight = FontWeight.Bold,
+            fontSize = 18.sp
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
-
+        // Displays ready templates in a two-column grid.
         LazyVerticalGrid(
+            modifier = Modifier.weight(1f),
             columns = GridCells.Fixed(2),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -152,12 +186,14 @@ fun HomeScreen(
                 key = { index -> filtered[index].id }
             ) { index ->
                 val template = filtered[index]
+
                 ReadyTemplateCard(
                     template = template,
                     onClick = {
                         navController.navigate("template_form/${template.id}")
                     },
                     onLongPress = {
+                        // Only AI-generated templates can be deleted from the home screen.
                         if (template.isAiGenerated) {
                             pendingDeleteTemplate = template
                         }
@@ -165,23 +201,35 @@ fun HomeScreen(
                 )
             }
         }
+
+        // Confirmation dialog for deleting AI-generated templates.
         pendingDeleteTemplate?.let { target ->
             AlertDialog(
-                onDismissRequest = { pendingDeleteTemplate = null },
-                title = { Text("Şablon silinsin mi?") },
+                onDismissRequest = {
+                    pendingDeleteTemplate = null
+                },
+                title = {
+                    Text("Şablon silinsin mi?")
+                },
                 text = {
                     Text("\"${target.title}\" AI tarafından kaydedilen şablonlardan silinecek.")
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        viewModel.deleteAiTemplate(target.id)
-                        pendingDeleteTemplate = null
-                    }) {
+                    TextButton(
+                        onClick = {
+                            viewModel.deleteAiTemplate(target.id)
+                            pendingDeleteTemplate = null
+                        }
+                    ) {
                         Text("Sil")
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { pendingDeleteTemplate = null }) {
+                    TextButton(
+                        onClick = {
+                            pendingDeleteTemplate = null
+                        }
+                    ) {
                         Text("Vazgeç")
                     }
                 }
@@ -197,6 +245,7 @@ private fun ReadyTemplateCard(
     onClick: () -> Unit,
     onLongPress: () -> Unit
 ) {
+    // Shows a short preview of the first required input fields.
     val parameterPreview = remember(template.requiredFields) {
         template.requiredFields
             .map { it.label }
@@ -205,7 +254,9 @@ private fun ReadyTemplateCard(
     }
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         modifier = Modifier
             .height(180.dp)
@@ -216,8 +267,7 @@ private fun ReadyTemplateCard(
             )
     ) {
         Box(
-            modifier = Modifier
-                .fillMaxSize()
+            modifier = Modifier.fillMaxSize()
         ) {
             Column(
                 modifier = Modifier
@@ -227,11 +277,14 @@ private fun ReadyTemplateCard(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Box {
+                    // Main icon based on the template category.
                     Icon(
-                        iconForCategory(template.category),
+                        imageVector = iconForCategory(template.category),
                         contentDescription = null,
                         tint = Color(0xFF1565C0)
                     )
+
+                    // Small AI badge shown only for AI-generated templates.
                     if (template.isAiGenerated) {
                         Icon(
                             imageVector = Icons.Default.SmartToy,
@@ -240,22 +293,38 @@ private fun ReadyTemplateCard(
                             modifier = Modifier
                                 .align(Alignment.TopStart)
                                 .padding(start = 0.dp, top = 0.dp)
-                                .background(Color(0xFFE8F5E9), RoundedCornerShape(8.dp))
+                                .background(
+                                    Color(0xFFE8F5E9),
+                                    RoundedCornerShape(8.dp)
+                                )
                                 .padding(2.dp)
                         )
                     }
                 }
+
                 Spacer(modifier = Modifier.height(8.dp))
+
+                // Template title.
                 Text(
-                    template.title,
+                    text = template.title,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(template.category, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                // Template category.
+                Text(
+                    text = template.category,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
                 Spacer(modifier = Modifier.height(6.dp))
+
+                // Short preview of required fields.
                 Text(
                     text = "Parametreler: $parameterPreview",
                     fontSize = 11.sp,
@@ -264,22 +333,42 @@ private fun ReadyTemplateCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-
         }
     }
 }
 
+// Selects an icon according to the template category text.
 private fun iconForCategory(category: String): ImageVector {
     val normalized = category.lowercase()
+
     return when {
-        "hukuk" in normalized || "idari" in normalized -> Icons.Default.Gavel
-        "eğitim" in normalized || "egitim" in normalized -> Icons.Default.School
-        "finans" in normalized || "banka" in normalized || "kredi" in normalized -> Icons.Default.AccountBalance
-        "sağlık" in normalized || "saglik" in normalized || "aile hekimi" in normalized -> Icons.Default.MedicalServices
-        "belediye" in normalized || "altyapı" in normalized || "altyapi" in normalized || "imar" in normalized -> Icons.Default.Apartment
-        "çalışma" in normalized || "is hayati" in normalized || "iş" in normalized || "is" in normalized -> Icons.Default.Work
-        "edit" in normalized || "yazım" in normalized -> Icons.Default.Edit
-        "genel" in normalized -> Icons.Default.Description
-        else -> Icons.Default.Description
+        "hukuk" in normalized || "idari" in normalized ->
+            Icons.Default.Gavel
+
+        "eğitim" in normalized || "egitim" in normalized ->
+            Icons.Default.School
+
+        "finans" in normalized || "banka" in normalized || "kredi" in normalized ->
+            Icons.Default.AccountBalance
+
+        "sağlık" in normalized || "saglik" in normalized || "aile hekimi" in normalized ->
+            Icons.Default.MedicalServices
+
+        "belediye" in normalized || "altyapı" in normalized ||
+                "altyapi" in normalized || "imar" in normalized ->
+            Icons.Default.Apartment
+
+        "çalışma" in normalized || "is hayati" in normalized ||
+                "iş" in normalized || "is" in normalized ->
+            Icons.Default.Work
+
+        "edit" in normalized || "yazım" in normalized ->
+            Icons.Default.Edit
+
+        "genel" in normalized ->
+            Icons.Default.Description
+
+        else ->
+            Icons.Default.Description
     }
 }

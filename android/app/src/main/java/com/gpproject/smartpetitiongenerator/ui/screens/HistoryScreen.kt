@@ -1,7 +1,6 @@
 package com.gpproject.smartpetitiongenerator.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,7 +17,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.gpproject.smartpetitiongenerator.data.local.PetitionEntity
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.PetitionViewModel
@@ -31,7 +29,7 @@ fun HistoryScreen(
     navController: NavController,
     viewModel: PetitionViewModel
 ) {
-    // Veritabanındaki listeyi anlık takip et
+    // Observes the saved petition history from the ViewModel.
     val historyList by viewModel.historyList.collectAsState()
 
     Column(
@@ -40,7 +38,7 @@ fun HistoryScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(16.dp)
     ) {
-        // Başlık
+        // Screen title.
         Text(
             text = "Geçmiş Dilekçelerim",
             style = MaterialTheme.typography.headlineSmall,
@@ -50,27 +48,37 @@ fun HistoryScreen(
         )
 
         if (historyList.isEmpty()) {
-            // Liste boşsa kullanıcıya bilgi ver
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Henüz kayıtlı bir dilekçeniz yok.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Empty state shown when there are no saved petitions.
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "Henüz kayıtlı bir dilekçeniz yok.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         } else {
-            // Liste Doluysa Göster
+            // Displays saved petitions in a scrollable list.
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(historyList) { petition ->
                     HistoryItemCard(
                         petition = petition,
-                        onDeleteClick = { viewModel.deletePetition(petition) },
+
+                        // Deletes the selected petition from local history.
+                        onDeleteClick = {
+                            viewModel.deletePetition(petition)
+                        },
+
+                        // Opens the selected petition in preview/edit mode.
                         onEditClick = {
-                            // Tıklandığında Preview ekranına HTML içeriğini gönder
-                            // Not: Gerçek uygulamada ID gönderip veritabanından çekmek daha sağlıklıdır.
-                            // Şimdilik string encode ile gönderiyoruz.
                             navController.navigate("preview_screen/${petition.id}?mode=edit")
                         },
+
+                        // Opens the selected petition in preview/share mode.
                         onShareClick = {
-                            // PDF indirme fonksiyonu buraya bağlanacak
                             navController.navigate("preview_screen/${petition.id}?mode=share")
                         }
                     )
@@ -87,28 +95,35 @@ fun HistoryItemCard(
     onEditClick: () -> Unit,
     onShareClick: () -> Unit
 ) {
-    // Tarih formatlama (Long -> String)
+    // Converts the saved timestamp into a readable Turkish date format.
     val dateString = SimpleDateFormat("dd MMM yyyy HH:mm", Locale("tr", "TR"))
         .format(Date(petition.createdDate))
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            // Üst Satır: Başlık ve Tarih
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            // Top section: petition title and creation date.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text(
                         text = petition.title,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
+
                     Text(
                         text = dateString,
                         style = MaterialTheme.typography.bodySmall,
@@ -118,27 +133,44 @@ fun HistoryItemCard(
             }
 
             Spacer(modifier = Modifier.height(12.dp))
-            Divider(color = MaterialTheme.colorScheme.outlineVariant, thickness = 0.5.dp)
+
+            Divider(
+                color = MaterialTheme.colorScheme.outlineVariant,
+                thickness = 0.5.dp
+            )
+
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Alt Satır: Aksiyon Butonları
+            // Bottom section: action buttons.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                // PDF İndir Butonu
+                // Opens PDF/share flow.
                 IconButton(onClick = onShareClick) {
-                    Icon(Icons.Default.Share, contentDescription = "PDF", tint = Color(0xFF4CAF50))
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "PDF",
+                        tint = Color(0xFF4CAF50)
+                    )
                 }
 
-                // Düzenle/Görüntüle Butonu
+                // Opens edit/preview flow.
                 IconButton(onClick = onEditClick) {
-                    Icon(Icons.Default.Edit, contentDescription = "Düzenle", tint = Color(0xFF1565C0))
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Düzenle",
+                        tint = Color(0xFF1565C0)
+                    )
                 }
 
-                // Sil Butonu
+                // Deletes the petition.
                 IconButton(onClick = onDeleteClick) {
-                    Icon(Icons.Default.Delete, contentDescription = "Sil", tint = Color.Red)
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Sil",
+                        tint = Color.Red
+                    )
                 }
             }
         }
