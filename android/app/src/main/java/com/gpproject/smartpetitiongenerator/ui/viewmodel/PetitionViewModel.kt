@@ -14,7 +14,7 @@ import com.gpproject.smartpetitiongenerator.data.remote.InputFieldDeserializer
 import com.gpproject.smartpetitiongenerator.data.remote.OcrQueueResponse
 import com.gpproject.smartpetitiongenerator.data.repository.MainRepository
 import com.gpproject.smartpetitiongenerator.domain.TemplateEngine
-import com.gpproject.smartpetitiongenerator.domain.ReadyPetitionTemplate
+import com.gpproject.smartpetitiongenerator.data.seed.ReadyPetitionTemplate
 import com.google.gson.GsonBuilder
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
@@ -765,8 +765,15 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
 
     suspend fun getPetitionById(id: Int) = repository.getPetitionById(id)
 
-    fun saveEditedPetition(id: Int, newHtml: String) {
-        viewModelScope.launch { repository.updatePetition(id, newHtml) }
+    fun saveEditedPetition(
+        id: Int,
+        html: String,
+        onSaved: (() -> Unit)? = null
+    ) {
+        viewModelScope.launch {
+            repository.updatePetition(id, html)
+            onSaved?.invoke()
+        }
     }
 
     // ✅ AI ile üretilen taslağı, ready_templates formatında DB'ye göm

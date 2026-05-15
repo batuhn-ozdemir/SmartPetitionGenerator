@@ -49,7 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
-import com.gpproject.smartpetitiongenerator.domain.ReadyPetitionTemplate
+import com.gpproject.smartpetitiongenerator.data.seed.ReadyPetitionTemplate
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.PetitionViewModel
 
 @OptIn(ExperimentalFoundationApi::class)
