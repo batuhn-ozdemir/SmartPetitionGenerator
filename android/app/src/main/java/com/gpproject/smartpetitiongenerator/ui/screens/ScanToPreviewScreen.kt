@@ -68,6 +68,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavController
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.GeminiOcrPreviewResult
 import com.gpproject.smartpetitiongenerator.ui.viewmodel.PetitionViewModel
+import com.gpproject.smartpetitiongenerator.ui.screens.demo_scan.DemoImageStore
+import com.gpproject.smartpetitiongenerator.ui.screens.demo_scan.DemoGalleryContent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -86,7 +88,8 @@ import kotlin.math.roundToInt
 private enum class ScanStep {
     START,  // Initial screen where the user selects or captures an image.
     CAMERA, // Camera preview screen.
-    CROP    // Corner selection and perspective correction screen.
+    CROP,    // Corner selection and perspective correction screen.
+    DEMO_GALLERY
 }
 
 private enum class CornerDragTarget {
@@ -131,6 +134,10 @@ fun ScanToPreviewScreen(
     }
     var warningText by remember { mutableStateOf<String?>(null) }
 
+    var demoImages by remember {
+        mutableStateOf(DemoImageStore.getDemoImages(context))
+    }
+
     // Opens Android photo picker and receives the selected image URI.
     val pickImageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -159,6 +166,25 @@ fun ScanToPreviewScreen(
         corners = defaultDocumentCorners()
         step = ScanStep.CROP
         statusText = "Görsel seçildi. Belgenin 4 köşesini sürükleyerek seçin."
+    }
+
+    val addDemoImageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri == null) {
+            statusText = "Demo fotoğraf ekleme iptal edildi."
+            return@rememberLauncherForActivityResult
+        }
+
+        val savedFile = DemoImageStore.saveImageFromUri(context, uri)
+
+        if (savedFile == null) {
+            warningText = "Fotoğraf demo galeriye eklenemedi."
+        } else {
+            demoImages = DemoImageStore.getDemoImages(context)
+            statusText = "Fotoğraf demo galeriye eklendi."
+            warningText = null
+        }
     }
 
     // Requests camera permission before opening the camera screen.
@@ -199,6 +225,10 @@ fun ScanToPreviewScreen(
                     } else {
                         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                     }
+                },
+                onOpenDemoGallery = {
+                    demoImages = DemoImageStore.getDemoImages(context)
+                    step = ScanStep.DEMO_GALLERY
                 }
             )
         }
@@ -313,6 +343,42 @@ fun ScanToPreviewScreen(
                 }
             )
         }
+
+        ScanStep.DEMO_GALLERY -> {
+            DemoGalleryContent(
+                demoImages = demoImages,
+                onAddImage = {
+                    addDemoImageLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                },
+                onImageSelected = { file ->
+                    val bitmap = DemoImageStore.decodeFileToBitmap(file)
+
+                    if (bitmap == null) {
+                        warningText = "Demo fotoğraf okunamadı."
+                        return@DemoGalleryContent
+                    }
+
+                    sourceBitmap = bitmap
+                    corners = defaultDocumentCorners()
+                    step = ScanStep.CROP
+                    statusText = "Demo fotoğraf seçildi. Belgenin 4 köşesini ayarlayın."
+                    warningText = null
+                },
+                onDeleteImage = { file ->
+                    val deleted = DemoImageStore.deleteDemoImage(file)
+
+                    demoImages = DemoImageStore.getDemoImages(context)
+
+                    statusText = if (deleted) {
+                        "Demo fotoğraf listeden kaldırıldı."
+                    } else {
+                        "Demo fotoğraf silinemedi."
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -322,7 +388,8 @@ private fun StartStepContent(
     statusText: String,
     warningText: String?,
     onPickImage: () -> Unit,
-    onOpenCamera: () -> Unit
+    onOpenCamera: () -> Unit,
+    onOpenDemoGallery: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -357,6 +424,14 @@ private fun StartStepContent(
         }
 
         Text(statusText, style = MaterialTheme.typography.bodyLarge)
+
+        Button(
+            onClick = onOpenDemoGallery,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Demo Galeri")
+        }
+
 
         warningText?.let {
             Text(
