@@ -89,7 +89,7 @@ private enum class ScanStep {
     START,  // Initial screen where the user selects or captures an image.
     CAMERA, // Camera preview screen.
     CROP,    // Corner selection and perspective correction screen.
-    DEMO_GALLERY
+    DEMO_GALLERY  // Just for demo presentation
 }
 
 private enum class CornerDragTarget {

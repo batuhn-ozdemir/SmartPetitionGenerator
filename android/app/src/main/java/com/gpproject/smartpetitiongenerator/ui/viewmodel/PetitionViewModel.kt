@@ -1,4 +1,4 @@
-package com.gpproject.smartpetitiongenerator.ui.viewmodel
+package com.gpproject.smartpetitiongenerator.viewmodel
 
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
@@ -25,7 +25,6 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.io.IOException
 import java.util.Locale
-import kotlin.math.max
 import kotlin.math.min
 
 class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
@@ -1014,11 +1013,7 @@ private fun buildRenderableLines(
         if (!duplicated) deduped += candidate
     }
 
-    val bounded = filterLinesToLikelyPaperArea(
-        imageWidthPx = imageWidthPx,
-        imageHeightPx = imageHeightPx,
-        lines = deduped
-    )
+    val bounded = deduped
 
     return bounded.map { line ->
         val widthPx = line.widthPx.coerceIn(1, imageWidthPx)
@@ -1036,56 +1031,6 @@ private fun buildRenderableLines(
             writingType = line.writingType
         )
     }
-}
-
-// Filters OCR lines to the most likely paper area and removes outside noise.
-private fun filterLinesToLikelyPaperArea(
-    imageWidthPx: Int,
-    imageHeightPx: Int,
-    lines: List<OcrPositionedText>
-): List<OcrPositionedText> {
-    if (lines.size < 6) return lines
-
-    val heights = lines.map { it.heightPx.coerceAtLeast(1) }.sorted()
-    val medianHeight = heights[heights.size / 2]
-    val pad = (medianHeight * 1.8f).toInt().coerceAtLeast(8)
-
-    val lefts = lines.map { it.leftPx }.sorted()
-    val tops = lines.map { it.topPx }.sorted()
-    val rights = lines.map { it.leftPx + it.widthPx.coerceAtLeast(1) }.sorted()
-    val bottoms = lines.map { it.topPx + it.heightPx.coerceAtLeast(1) }.sorted()
-
-    val leftBound = (percentile(lefts, 0.08f) - pad).coerceIn(0, imageWidthPx - 1)
-    val rightBound = (percentile(rights, 0.92f) + pad).coerceIn(1, imageWidthPx)
-    val topBound = (percentile(tops, 0.05f) - pad).coerceIn(0, imageHeightPx - 1)
-    val bottomBound = (percentile(bottoms, 0.90f) + pad).coerceIn(1, imageHeightPx)
-
-    if (rightBound <= leftBound || bottomBound <= topBound) return lines
-
-    val filtered = lines.filter { line ->
-        val lineLeft = line.leftPx
-        val lineRight = line.leftPx + line.widthPx.coerceAtLeast(1)
-        val lineTop = line.topPx
-        val lineBottom = line.topPx + line.heightPx.coerceAtLeast(1)
-
-        val overlap =
-            (min(lineRight, rightBound) - max(lineLeft, leftBound)).coerceAtLeast(0)
-        val overlapRatio = overlap.toFloat() / line.widthPx.coerceAtLeast(1).toFloat()
-
-        overlapRatio >= 0.35f &&
-                lineTop >= topBound &&
-                lineBottom <= bottomBound
-    }
-
-    return if (filtered.size >= 3) filtered else lines
-}
-
-// Returns an approximate percentile value from a sorted integer list.
-private fun percentile(sortedValues: List<Int>, ratio: Float): Int {
-    if (sortedValues.isEmpty()) return 0
-    val boundedRatio = ratio.coerceIn(0f, 1f)
-    val idx = ((sortedValues.size - 1) * boundedRatio).toInt().coerceIn(0, sortedValues.lastIndex)
-    return sortedValues[idx]
 }
 
 // Normalizes OCR text for duplicate detection.

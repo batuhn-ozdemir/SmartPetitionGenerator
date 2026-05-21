@@ -240,6 +240,18 @@ public class DocumentOcrService {
                     continue;
                 }
 
+//                // Just for OCR results debugging purpose
+//                System.out.println("OCR PARSED LINES:");
+//                if (parsed != null && parsed.getLines() != null) {
+//                    parsed.getLines().forEach(line -> {
+//                        System.out.println(
+//                                line.getTopPx() + " | " +
+//                                        line.getLeftPx() + " | " +
+//                                        line.getText()
+//                        );
+//                    });
+//                }
+
                 // Clean text, bounding boxes, reading order, indentation, and default fields.
                 normalizeLineTexts(parsed);
                 normalizeResponse(parsed);
