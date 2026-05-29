@@ -1,4 +1,4 @@
-package com.gpproject.smartpetitiongenerator.viewmodel
+package com.gpproject.smartpetitiongenerator.ui.viewmodel
 
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
@@ -404,7 +404,7 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
             } catch (e: Exception) {
                 //e.printStackTrace()
                 //println("GENERATE PETITION EXCEPTION = ${e.message}")
-                _aiState.value = AiState.Error("Hata: ${e.localizedMessage}")
+                _aiState.value = AiState.Error(userFriendlyNetworkMessage(e))
             }
         }
     }
@@ -495,8 +495,24 @@ class PetitionViewModel(private val repository: MainRepository) : ViewModel() {
                 _aiState.value = AiState.Success
 
             } catch (e: Exception) {
-                _aiState.value = AiState.Error("Hata: ${e.localizedMessage}")
+                _aiState.value = AiState.Error(userFriendlyNetworkMessage(e))
             }
+        }
+    }
+
+    private fun userFriendlyNetworkMessage(e: Throwable): String {
+        return when (e) {
+            is UnknownHostException ->
+                "İnternet bağlantısı bulunamadı. Lütfen bağlantınızı kontrol edip tekrar deneyin."
+
+            is SocketTimeoutException ->
+                "İstek zaman aşımına uğradı. Lütfen internet bağlantınızı kontrol edip tekrar deneyin."
+
+            is IOException ->
+                "Sunucuya bağlanılamadı. İnternet bağlantınızı kontrol edip tekrar deneyin."
+
+            else ->
+                "İşlem şu anda tamamlanamadı. Lütfen tekrar deneyin."
         }
     }
 
